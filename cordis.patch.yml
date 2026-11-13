@@ -1,0 +1,5 @@
+# 注册豆包 provider，不改动 profile 的默认模型。
+# 插件复用豆包桌面端「工作模式」的登录态，不启动独立 OAuth 流程。
+- insert:
+    - id: dsh-connect-doubaowork
+      name: dsh-connect-doubaowork

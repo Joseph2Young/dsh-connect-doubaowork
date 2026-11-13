@@ -1,0 +1,60 @@
+{
+  "name": "dsh-connect-doubaowork",
+  "version": "0.1.0",
+  "description": "DSH 插件：复用豆包桌面端「工作模式」登录态，把豆包聚合的模型（豆包 / DeepSeek / Kimi / GLM）以本机 OpenAI 兼容网关的形式接入 DSH",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "plugin.js",
+    "shim.js",
+    "adapter.js",
+    "catalog.js",
+    "config.js",
+    "credentials.js",
+    "doubao-protocol.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "test": "node --test \"tests/*.test.js\""
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "doubao",
+    "llm-provider",
+    "openai-compatible"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Joseph2Young/dsh-connect-doubaowork.git"
+  },
+  "homepage": "https://github.com/Joseph2Young/dsh-connect-doubaowork#readme",
+  "bugs": {
+    "url": "https://github.com/Joseph2Young/dsh-connect-doubaowork/issues"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.1-rc.1 <5.0.0 || >=4.0.2 <5.0.0",
+    "@deepseek-ai/dsh-llm": ">=0.1.7-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-llm-pi-ai": ">=0.1.7-rc.1 <0.3.0-0",
+    "@deepseek-ai/schemastery": "^3.19.0",
+    "@earendil-works/pi-ai": ">=1.0.0-0 <2.0.0"
+  }
+}
