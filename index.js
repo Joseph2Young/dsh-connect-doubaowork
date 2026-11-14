@@ -52,6 +52,7 @@ export function apply(ctx, config) {
       heartbeatSeconds: normalized.heartbeatSeconds,
       flattenHistory: normalized.flattenHistory,
       workMode: normalized.workMode,
+      conversationMode: normalized.conversationMode,
     },
     log,
   })

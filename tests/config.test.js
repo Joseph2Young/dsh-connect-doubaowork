@@ -36,6 +36,7 @@ test('createConfigSchema 字段种类与默认值', () => {
   assert.deepEqual(Object.keys(fields), [
     'enabledModelIds', 'workMode', 'reasoningEffort', 'autoDiscoverCredentials',
     'credentialsFile', 'chatUrl', 'userAgent', 'timeoutSeconds', 'heartbeatSeconds', 'flattenHistory',
+    'conversationMode',
   ])
   assert.equal(fields.enabledModelIds.kind, 'array')
   assert.deepEqual(fields.enabledModelIds.defaultValue, [])
@@ -49,6 +50,8 @@ test('createConfigSchema 字段种类与默认值', () => {
   assert.equal(fields.flattenHistory.defaultValue, true)
   assert.equal(fields.credentialsFile.defaultValue, '')
   assert.equal(fields.autoDiscoverCredentials.defaultValue, true)
+  assert.equal(fields.conversationMode.kind, 'string')
+  assert.equal(fields.conversationMode.defaultValue, DOUBAO_DEFAULTS.conversationMode)
 })
 
 test('normalizeConfig 空配置 → 全默认', () => {
@@ -61,6 +64,7 @@ test('normalizeConfig 空配置 → 全默认', () => {
   assert.equal(config.heartbeatSeconds, 15)
   assert.equal(config.flattenHistory, true)
   assert.equal(config.autoDiscoverCredentials, true)
+  assert.equal(config.conversationMode, 'per-chat')
 })
 
 test('normalizeConfig 归一与收口', () => {
@@ -70,12 +74,16 @@ test('normalizeConfig 归一与收口', () => {
     reasoningEffort: '2',
     timeoutSeconds: '30',
     heartbeatSeconds: 0,
+    conversationMode: 'single',
   })
   assert.deepEqual(config.enabledModelIds, ['1', 'kimi-k3'])
   assert.equal(config.workMode, false)
   assert.equal(config.reasoningEffort, '2')
   assert.equal(config.timeoutSeconds, 30)
   assert.equal(config.heartbeatSeconds, 0)
+  assert.equal(config.conversationMode, 'single')
+  // 非法值回落 per-chat
+  assert.equal(normalizeConfig({ conversationMode: 'bogus' }).conversationMode, 'per-chat')
 })
 
 test('clampEffort 只放行 0-4', () => {

@@ -17,6 +17,8 @@ const MODELS_PATH = '/v1/models'
 const HEALTH_PATH = '/healthz'
 const MAX_BODY_BYTES = 32 * 1024 * 1024
 const MAX_CONVERSATIONS = 512
+/** single 会话模式下的固定键：所有请求复用同一条豆包会话。 */
+const SINGLE_CONVERSATION_KEY = 'dsh-single'
 
 function randomToken() {
   return randomBytes(24).toString('base64url')
@@ -198,7 +200,10 @@ export function createDoubaoShim(options) {
       return
     }
 
-    const convKey = conversationKey(payload, messages)
+    // single 模式下所有请求共用固定键 → 豆包侧只保留一条会话记录
+    const convKey = defaults.conversationMode === 'single'
+      ? SINGLE_CONVERSATION_KEY
+      : conversationKey(payload, messages)
     const previous = conversations.get(convKey)
     const conversationId = previous?.conversationId ?? ''
 

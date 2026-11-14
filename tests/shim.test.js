@@ -59,7 +59,7 @@ const CREDENTIAL = Object.freeze({
   localAppId: '582478',
 })
 
-function makeShim(mockPort, { withCredential = true } = {}) {
+function makeShim(mockPort, { withCredential = true, conversationMode } = {}) {
   return createDoubaoShim({
     catalog: () => deriveCatalog([]),
     resolveModel,
@@ -73,6 +73,7 @@ function makeShim(mockPort, { withCredential = true } = {}) {
       chatUrl: `http://127.0.0.1:${mockPort}/chat/completion`,
       timeoutSeconds: 5,
       heartbeatSeconds: 0,
+      ...(conversationMode !== undefined ? { conversationMode } : {}),
     },
   })
 }
@@ -156,6 +157,31 @@ test('shim 全链路：OpenAI 请求 → 豆包工作模式 → OpenAI SSE', asy
     assert.equal(second.body.client_meta.conversation_id, 'conv-123')
     assert.equal(second.body.option.need_create_conversation, false)
     assert.equal(second.body.option.model_config.model_item_key, 'person-deepseek-v4-1-flash-261017')
+  } finally {
+    await shim.close()
+    await new Promise(resolve => mock.close(() => resolve()))
+  }
+})
+
+test('shim single 模式：不同首条消息也复用同一条豆包会话', async () => {
+  const requests = []
+  const mock = await startMockUpstream(requests)
+  const shim = makeShim(mock.address().port, { conversationMode: 'single' })
+  await shim.start()
+  try {
+    for (const question of ['第一个问题', '另一个不同开头的问题']) {
+      const response = await fetch(`${shim.baseUrl()}/chat/completions`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${shim.token()}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'glm-5.3', messages: [{ role: 'user', content: question }], stream: true }),
+      })
+      assert.equal(response.status, 200)
+      await response.text()
+    }
+    // 两次请求首条消息不同，但 single 模式下第二条仍复用 conv-123
+    assert.equal(requests[0].body.option.need_create_conversation, true)
+    assert.equal(requests[1].body.client_meta.conversation_id, 'conv-123')
+    assert.equal(requests[1].body.option.need_create_conversation, false)
   } finally {
     await shim.close()
     await new Promise(resolve => mock.close(() => resolve()))
