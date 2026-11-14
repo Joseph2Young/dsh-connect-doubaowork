@@ -272,6 +272,7 @@ export function createDoubaoShim(options) {
     const id = 'chatcmpl-' + shortHash(convKey)
     const created = Math.floor(Date.now() / 1000)
     let wrote = false
+    let clarified = false
     let finalText = ''
     const writeDelta = (delta, finishReason = null) => {
       res.write(`data: ${JSON.stringify({
@@ -293,6 +294,19 @@ export function createDoubaoShim(options) {
       },
       onConversation(conversation, section) {
         rememberConversation(convKey, conversation || '')
+      },
+      onClarify(titles) {
+        // 豆包工作模式反问：把问题文本转成正文流给调用方，然后主动断开上游。
+        // 服务端发出反问后会长连等用户在豆包端回答（可达数十分钟），DSH 侧的
+        // 回答走下一轮请求（复用同一 conversation_id），所以这里必须提前收尾，
+        // 否则调用方会挂到 timeoutSeconds 超时且看不到问题。
+        if (clarified) return
+        clarified = true
+        const formatted = titles.map(title => `❓ ${title}`).join('\n\n')
+        wrote = true
+        finalText += (finalText === '' ? '' : '\n\n') + formatted
+        if (isStream) writeDelta({ content: `${finalText === formatted ? '' : '\n\n'}${formatted}` })
+        controller.abort(new Error('豆包进入等待回答状态，已提前收尾'))
       },
       onFinish(endType, brief) {
         if (endType !== 1 && !wrote && brief !== '') {

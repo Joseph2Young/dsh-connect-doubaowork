@@ -213,6 +213,37 @@ test('pumpSse 走 async iterable 兜底路径', async () => {
   assert.deepEqual(texts, ['迭代'])
 })
 
+test('pumpSse 反问块 10082 提取 questions[].title 并回调 onClarify', async () => {
+  // 真实抓包形态：interaction_ask_block.questions[].title 承载问题正文
+  const askBlock = {
+    block_type: 10082,
+    content: {
+      interaction_ask_block: {
+        clarify_id: 'f32897ce-908e-4773-9b44-5fc7b27f9678',
+        questions: [
+          { question_id: 'completion_context', type: 3, title: '请提供目标文件路径与语言环境', required: true },
+          { question_id: 'empty_title', title: '' },
+          { question_id: 'no_title' },
+        ],
+        status: 1,
+      },
+    },
+  }
+  const sse = [
+    'event: STREAM_CHUNK',
+    `data: {"patch_op":[{"patch_value":{"content_block":[${JSON.stringify(askBlock)}]}}]}`,
+    '',
+    // 反问块之后不会再有 SSE_REPLY_END（服务端长连等回答）
+  ].join('\n')
+  const events = []
+  await pumpSse(streamFrom([sse]), {
+    onText: text => events.push(['text', text]),
+    onClarify: titles => events.push(['clarify', titles]),
+    onFinish: () => events.push(['finish']),
+  })
+  assert.deepEqual(events, [['clarify', ['请提供目标文件路径与语言环境']]])
+})
+
 test('pumpSse 末尾无换行也派发', async () => {
   const texts = []
   await pumpSse(streamFrom(['event: CHUNK_DELTA\ndata: {"text":"EOF"}']), {

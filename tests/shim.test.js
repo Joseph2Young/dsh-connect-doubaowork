@@ -188,6 +188,83 @@ test('shim single 模式：不同首条消息也复用同一条豆包会话', as
   }
 })
 
+test('shim 反问块 10082 → 问题转正文并立即收尾，下一轮复用会话继续', async () => {
+  // 真实行为：豆包工作模式反问时发 interaction_ask_block（10082）后不发
+  // SSE_REPLY_END，长连等待用户在豆包端回答。shim 必须把问题转成正文、
+  // 主动断开上游收尾；DSH 侧下一轮回答凭同一 conversation_id 续跑。
+  const requests = []
+  let call = 0
+  const server = await new Promise(resolve => {
+    const s = http.createServer((req, res) => {
+      let raw = ''
+      req.on('data', chunk => {
+        raw += chunk
+      })
+      req.on('end', () => {
+        let body = {}
+        try {
+          body = JSON.parse(raw)
+        } catch {}
+        requests.push({ url: req.url, body })
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+        call += 1
+        if (call === 1) {
+          res.write('event: SSE_ACK\ndata: {"ack_client_meta":{"conversation_id":"conv-77","section_id":"sec-7"}}\n\n')
+          res.write('event: STREAM_CHUNK\ndata: {"patch_op":[{"patch_value":{"content_block":[{"block_type":10000,"content":{"text_block":{"text":"我先确认一个关键信息。"}}}]}}]}\n\n')
+          res.write('event: STREAM_CHUNK\ndata: {"patch_op":[{"patch_value":{"content_block":[{"block_type":10082,"content":{"interaction_ask_block":{"questions":[{"question_id":"q1","title":"请提供目标文件路径"}]}}}]}}]}\n\n')
+          // 故意不 end()：模拟长连等待；shim 应主动 abort 收尾
+          res.on('error', () => {})
+        } else {
+          res.end(SSE_PAYLOAD)
+        }
+      })
+    })
+    s.listen(0, '127.0.0.1', () => resolve(s))
+  })
+  const shim = makeShim(server.address().port)
+  await shim.start()
+  try {
+    const post = messages => fetch(`${shim.baseUrl()}/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${shim.token()}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'deepseek-v4-flash', messages, stream: true }),
+    })
+    const firstMessages = [
+      { role: 'system', content: '你是助手' },
+      { role: 'user', content: '帮我补全代码' },
+    ]
+    const started = Date.now()
+    const res1 = await post(firstMessages)
+    assert.equal(res1.status, 200)
+    const chunks1 = parseSse(await res1.text())
+    const deltas1 = chunks1.map(chunk => chunk.choices[0].delta)
+    assert.deepEqual(deltas1, [
+      { content: '我先确认一个关键信息。' },
+      { content: '\n\n❓ 请提供目标文件路径' },
+      {},
+    ])
+    assert.equal(chunks1[chunks1.length - 1].choices[0].finish_reason, 'stop')
+    // 反问轮必须远快于 timeoutSeconds=5：主动 abort 而非挂到超时
+    assert.ok(Date.now() - started < 4000, `反问轮耗时 ${Date.now() - started}ms，应立即收尾`)
+    assert.equal(requests[0].body.option.need_create_conversation, true)
+
+    // 第二轮：DSH 侧回答凭同一 conversation_id 回到同一豆包会话
+    const res2 = await post([
+      ...firstMessages,
+      { role: 'assistant', content: '我先确认一个关键信息。\n\n❓ 请提供目标文件路径' },
+      { role: 'user', content: '路径是 src/a.ts' },
+    ])
+    assert.equal(res2.status, 200)
+    const chunks2 = parseSse(await res2.text())
+    assert.ok(chunks2.length > 0)
+    assert.equal(requests[1].body.client_meta.conversation_id, 'conv-77')
+    assert.equal(requests[1].body.option.need_create_conversation, false)
+  } finally {
+    await shim.close()
+    await new Promise(resolve => server.close(() => resolve()))
+  }
+})
+
 test('shim 非流式返回 chat.completion JSON', async () => {
   const requests = []
   const mock = await startMockUpstream(requests)

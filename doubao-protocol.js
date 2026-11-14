@@ -268,7 +268,7 @@ async function* toChunks(stream) {
  * 解析豆包 SSE 流并回调 sink（Pump 的 JS 版）。
  *
  * @param {ReadableStream|AsyncIterable<Uint8Array>} stream 上游响应体
- * @param {object} sink { onText, onReasoning, onConversation, onFinish }
+ * @param {object} sink { onText, onReasoning, onConversation, onClarify, onFinish }
  */
 export async function pumpSse(stream, sink) {
   const decoder = new TextDecoder()
@@ -307,6 +307,18 @@ export async function pumpSse(stream, sink) {
             const thinking = block?.content?.thinking_block
             const title = thinking?.streaming_title || thinking?.finish_title
             if (typeof title === 'string' && title !== '') sink.onReasoning?.(title)
+          } else if (block?.block_type === 10082) {
+            // 工作模式反问块（interaction_ask_block）：豆包暂停执行、等待用户补充信息。
+            // 问题正文在 questions[].title 里（正文文本块只有引导语）；此时服务端不会
+            // 发 SSE_REPLY_END，而是长连用心跳等回答，因此必须回调 onClarify 让
+            // shim 立即收尾，否则调用方会一直挂到超时。
+            const ask = block?.content?.interaction_ask_block
+            const questions = Array.isArray(ask?.questions) ? ask.questions : []
+            const titles = []
+            for (const question of questions) {
+              if (typeof question?.title === 'string' && question.title !== '') titles.push(question.title)
+            }
+            if (titles.length > 0) sink.onClarify?.(titles)
           }
         }
       }
