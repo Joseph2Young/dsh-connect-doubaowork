@@ -64,7 +64,7 @@ test('normalizeConfig 空配置 → 全默认', () => {
   assert.equal(config.heartbeatSeconds, 15)
   assert.equal(config.flattenHistory, true)
   assert.equal(config.autoDiscoverCredentials, true)
-  assert.equal(config.conversationMode, 'per-chat')
+  assert.equal(config.conversationMode, 'single')
 })
 
 test('normalizeConfig 归一与收口', () => {
@@ -82,8 +82,10 @@ test('normalizeConfig 归一与收口', () => {
   assert.equal(config.timeoutSeconds, 30)
   assert.equal(config.heartbeatSeconds, 0)
   assert.equal(config.conversationMode, 'single')
-  // 非法值回落 per-chat
-  assert.equal(normalizeConfig({ conversationMode: 'bogus' }).conversationMode, 'per-chat')
+  // 非法值回落 single（默认）
+  assert.equal(normalizeConfig({ conversationMode: 'bogus' }).conversationMode, 'single')
+  // 显式 per-chat 仍然生效
+  assert.equal(normalizeConfig({ conversationMode: 'per-chat' }).conversationMode, 'per-chat')
 })
 
 test('clampEffort 只放行 0-4', () => {

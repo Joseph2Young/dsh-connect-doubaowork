@@ -106,15 +106,17 @@ pnpm add file:/绝对路径/dsh-connect-doubaowork
 | `timeoutSeconds` | `300` | 上游请求超时 |
 | `heartbeatSeconds` | `15` | SSE 心跳间隔，`0` = 关闭 |
 | `flattenHistory` | `true` | 首轮把历史消息压平为一段 |
-| `conversationMode` | `"per-chat"` | 豆包侧会话归属：`per-chat` = 每个 DSH 会话一条豆包记录；`single` = 全部复用同一条豆包会话 |
+| `conversationMode` | `"single"` | 豆包侧会话归属：`single` = 全部复用同一条豆包会话（默认）；`per-chat` = 每个 DSH 会话一条豆包记录 |
 
 ## 关于豆包侧的会话记录
 
-工作模式端点就是豆包客户端聊天走的同一个服务端接口，因此在 DSH 里的每段对话都会落在豆包账号的会话列表里——这是免费额度路线的固有行为，插件无法关闭服务端留痕（运行时并不启动或驱动豆包客户端）。
+工作模式端点就是豆包客户端聊天走的同一个服务端接口，因此在 DSH 里的对话会落在豆包账号的会话列表里——这是免费额度路线的固有行为，插件无法关闭服务端留痕（运行时并不启动或驱动豆包客户端）。
 
-可以缓解：
+插件默认 `conversationMode: "single"`：所有 DSH 请求复用同一条豆包会话，客户端里只出现一条记录。会话锚定用的是「首条 user 消息」而非首条消息本身——pi-ai 对不支持会话中 system 的模型会在第二轮起移除首条 system，若按首条消息哈希会键漂移、每个 agent 轮次新建一条豆包窗口。
 
-- 设 `conversationMode: "single"`：所有 DSH 请求复用同一条豆包会话，客户端里只出现一条记录，不再每会话新增一条；
+可以进一步调整：
+
+- 设 `conversationMode: "per-chat"`：每个 DSH 会话对应一条豆包记录（按会话隔离历史）；
 - 在豆包桌面端登录一个次要账号（或在 `credentials.json` 里填次要账号的 Cookie），主账号的客户端保持干净。
 
 ## 豆包反问如何回到 DSH

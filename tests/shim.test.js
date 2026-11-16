@@ -163,6 +163,56 @@ test('shim 全链路：OpenAI 请求 → 豆包工作模式 → OpenAI SSE', asy
   }
 })
 
+test('shim 会话键漂移防御：第二轮首条消息由 system 变 user 仍复用同一豆包会话', async () => {
+  // 真实场景：pi-ai 对不支持会话中 system 的模型，第二轮起把 system 移除，
+  // messages[0] 从 {system,…} 变成 {user,…}。旧实现按 messages[0] 哈希做键，
+  // 键漂移导致第二轮 need_create=true、豆包客户端多出一条窗口。
+  // 修复后按「首条 user 消息文本」锚定，跨轮稳定。
+  const requests = []
+  const mock = await startMockUpstream(requests)
+  const shim = makeShim(mock.address().port, { conversationMode: 'per-chat' })
+  await shim.start()
+  try {
+    // 第一轮：system + user（DSH agent 会话的典型首轮形状）
+    const first = await fetch(`${shim.baseUrl()}/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${shim.token()}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'deepseek-v4-flash',
+        messages: [
+          { role: 'system', content: 'DeepSeek Harness 系统提示' },
+          { role: 'user', content: '生成A股全绿图片' },
+        ],
+        stream: true,
+      }),
+    })
+    assert.equal(first.status, 200)
+    await first.text()
+    // 第二轮：system 被 pi-ai 移除，首条消息变为同文本 user
+    const second = await fetch(`${shim.baseUrl()}/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${shim.token()}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'deepseek-v4-flash',
+        messages: [
+          { role: 'user', content: '生成A股全绿图片' },
+          { role: 'assistant', content: '好的' },
+          { role: 'user', content: '换个风格再来一张' },
+        ],
+        stream: true,
+      }),
+    })
+    assert.equal(second.status, 200)
+    await second.text()
+    assert.equal(requests[0].body.option.need_create_conversation, true)
+    assert.equal(requests[1].body.client_meta.conversation_id, 'conv-123')
+    assert.equal(requests[1].body.option.need_create_conversation, false)
+  } finally {
+    await shim.close()
+    await new Promise(resolve => mock.close(() => resolve()))
+  }
+})
+
 test('shim single 模式：不同首条消息也复用同一条豆包会话', async () => {
   const requests = []
   const mock = await startMockUpstream(requests)

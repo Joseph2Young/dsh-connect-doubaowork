@@ -12,8 +12,9 @@ export const DOUBAO_DEFAULTS = Object.freeze({
   timeoutSeconds: 300,
   heartbeatSeconds: 15,
   flattenHistory: true,
-  // 豆包侧会话归属：per-chat = 每个 DSH 会话对应一条豆包记录；single = 全部复用同一条豆包会话
-  conversationMode: 'per-chat',
+  // 豆包侧会话归属：single = 全部复用同一条豆包会话（默认，避免客户端窗口膨胀）；
+  // per-chat = 每个 DSH 会话对应一条豆包记录
+  conversationMode: 'single',
   workMode: true,
   botId: '7338286299411103781',
   modeId: '3',
@@ -60,7 +61,7 @@ export function createConfigSchema(z) {
     timeoutSeconds: z.number().default(DOUBAO_DEFAULTS.timeoutSeconds).description('上游请求超时（秒）'),
     heartbeatSeconds: z.number().default(DOUBAO_DEFAULTS.heartbeatSeconds).description('SSE 心跳间隔（秒）'),
     flattenHistory: z.boolean().default(DOUBAO_DEFAULTS.flattenHistory).description('首轮把历史消息压平为一段'),
-    conversationMode: z.string().default(DOUBAO_DEFAULTS.conversationMode).description('豆包侧会话归属：per-chat = 每个 DSH 会话一条豆包记录；single = 全部落进同一条豆包会话'),
+    conversationMode: z.string().default(DOUBAO_DEFAULTS.conversationMode).description('豆包侧会话归属：single = 全部落进同一条豆包会话（默认）；per-chat = 每个 DSH 会话一条豆包记录'),
   })
 }
 
@@ -99,7 +100,7 @@ export function normalizeConfig(config) {
     // 心跳 0 = 关闭 ping（与上游「HeartbeatSeconds>0 才发」的语义一致）
     heartbeatSeconds: clampNonNegativeInt(pick('heartbeatSeconds', DOUBAO_DEFAULTS.heartbeatSeconds), DOUBAO_DEFAULTS.heartbeatSeconds),
     flattenHistory: pick('flattenHistory', DOUBAO_DEFAULTS.flattenHistory) !== false,
-    // 只认 'single'，其余一律回落 per-chat，避免配置笔误改变落库行为
-    conversationMode: raw.conversationMode === 'single' ? 'single' : 'per-chat',
+    // 只认 'per-chat'，其余一律回落 single（默认），避免配置笔误改变落库行为
+    conversationMode: raw.conversationMode === 'per-chat' ? 'per-chat' : 'single',
   }
 }

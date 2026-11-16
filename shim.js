@@ -10,7 +10,7 @@
  */
 import http from 'node:http'
 import { randomBytes, randomUUID } from 'node:crypto'
-import { shortHash } from './doubao-protocol.js'
+import { extractText, shortHash } from './doubao-protocol.js'
 
 const CHAT_PATH = '/v1/chat/completions'
 const MODELS_PATH = '/v1/models'
@@ -132,13 +132,24 @@ export function createDoubaoShim(options) {
     return Buffer.concat(chunks).toString('utf8')
   }
 
-  /** 会话键：显式 metadata 优先，否则按「模型 + 首条消息」哈希（对照 handler.go）。 */
+  /**
+   * 会话键：显式 metadata 优先；否则按「模型 + 首条 user 消息文本」哈希。
+   * 不用 messages[0]（对照 handler.go 的做法已弃用）：pi-ai 对不支持会话中
+   * system 的模型会在第二轮起改写首条消息（system 被移除/转移），导致键漂移、
+   * 每个 agent 轮次都新建一条豆包会话。首条 user 消息文本在所有轮次都会被
+   * pi-ai 原样保留，是唯一跨轮稳定的历史锚点。
+   */
   function conversationKey(payload, messages) {
     const meta = payload?.metadata ?? {}
     const explicit = meta.conversation_id ?? meta.conversationId ?? meta.session_id
     if (typeof explicit === 'string' && explicit !== '') return explicit
-    const first = messages.length > 0 ? JSON.stringify(messages[0]) : ''
-    return shortHash(`${payload?.model ?? ''}\u0000${first}`)
+    let firstUser = ''
+    for (const message of messages) {
+      if (String(message?.role ?? '') !== 'user') continue
+      firstUser = extractText(message?.content).trim()
+      break
+    }
+    return shortHash(`${payload?.model ?? ''}\u0000${firstUser}`)
   }
 
   function rememberConversation(convKey, conversationId) {
