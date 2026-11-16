@@ -67,8 +67,7 @@ export function loadCredentials({ credentialsFile = '', autoDiscover = true, env
  * 从豆包桌面端 Local State 自动发现（实验性）。
  * @param {string} [localStatePath] 测试可注入
  */
-export function discoverCredentialsFromDoubaoApp(localStatePath = DOUBAO_LOCAL_STATE_PATH) {
-  let state
+export function discoverCredentialsFromDoubaoApp(localStatePath = DOUBAO_LOCAL_STATE_PATH) {  let state
   try {
     state = JSON.parse(fs.readFileSync(localStatePath, 'utf8'))
   } catch {
@@ -99,4 +98,68 @@ export function discoverCredentialsFromDoubaoApp(localStatePath = DOUBAO_LOCAL_S
     tea_uuid: str(device.install_id ?? device.device_id ?? ''),
     local_app_id: '582478',
   })
+}
+
+/**
+ * 账号池装配：把「插件配置主账号 + 凭据文件（数组或旧单账号）+ 自动发现」
+ * 合并为一组去重的启用账号。
+ *
+ * 优先级（高 → 低）：config 主账号 → 凭据文件 → 自动发现。同 id 后到者跳过；
+ * cookie 不含 sessionid= 的条目直接丢弃（与单凭据校验同规则）。
+ *
+ * @param {object} [input]
+ * @param {object} [input.account] 插件配置里的主账号（normalizeAccountShape 产物）
+ * @param {string} [input.credentialsFile] 凭据文件路径（空 = 默认路径链）
+ * @param {boolean} [input.autoDiscover] 文件无凭据时是否尝试桌面端自动发现
+ * @param {object} [input.env] 环境变量（测试注入）
+ * @returns {Array<object>} [{id,label,cookie,deviceId,webId,teaUuid,localAppId,enabled}]
+ */
+export function loadAccountList({ account, credentialsFile = '', autoDiscover = true, env = process.env } = {}) {
+  const accounts = []
+  const seen = new Set()
+  const push = (entry, fallbackLabel) => {
+    const normalized = normalizeCredentials(entry)
+    if (normalized === undefined) return
+    const id = str(entry?.id).trim() || `account-${accounts.length + 1}`
+    if (seen.has(id)) return
+    seen.add(id)
+    accounts.push({
+      ...normalized,
+      id,
+      label: str(entry?.label).trim() || fallbackLabel || id,
+      enabled: entry?.enabled !== false,
+    })
+  }
+
+  // 1) 插件配置里的主账号
+  if (account && typeof account === 'object' && account.cookie !== '') {
+    push({ ...account, id: account.id || 'primary' }, '主账号')
+  }
+
+  // 2) 凭据文件：支持 accounts 数组（新）或旧单账号形状
+  const fromEnv = env[CREDENTIALS_FILE_ENV]
+  const candidates = [fromEnv, credentialsFile, DEFAULT_CREDENTIALS_PATH]
+  const tried = new Set()
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string' || candidate === '' || tried.has(candidate)) continue
+    tried.add(candidate)
+    let raw
+    try {
+      raw = JSON.parse(fs.readFileSync(candidate, 'utf8'))
+    } catch {
+      continue
+    }
+    if (Array.isArray(raw?.accounts)) {
+      for (const entry of raw.accounts) push(entry)
+    } else {
+      push(raw)
+    }
+    if (accounts.length > 0) break
+  }
+
+  // 3) 自动发现兜底
+  if (accounts.length === 0 && autoDiscover) {
+    push(discoverCredentialsFromDoubaoApp(), '桌面端登录态')
+  }
+  return accounts
 }

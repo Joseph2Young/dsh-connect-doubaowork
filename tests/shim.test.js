@@ -59,11 +59,15 @@ const CREDENTIAL = Object.freeze({
   localAppId: '582478',
 })
 
-function makeShim(mockPort, { withCredential = true, conversationMode } = {}) {
+function makeShim(mockPort, { withCredential = true, conversationMode, accountsOverride, poolEnabled } = {}) {
   return createDoubaoShim({
     catalog: () => deriveCatalog([]),
     resolveModel,
-    credentials: () => (withCredential ? { ...CREDENTIAL } : undefined),
+    accounts: () => {
+      if (typeof accountsOverride === 'function') return accountsOverride()
+      if (accountsOverride !== undefined) return accountsOverride
+      return withCredential ? [{ id: 'primary', label: 'primary', ...CREDENTIAL }] : []
+    },
     buildBody: buildRequestBody,
     pump: pumpSse,
     defaults: {
@@ -73,6 +77,7 @@ function makeShim(mockPort, { withCredential = true, conversationMode } = {}) {
       chatUrl: `http://127.0.0.1:${mockPort}/chat/completion`,
       timeoutSeconds: 5,
       heartbeatSeconds: 0,
+      ...(poolEnabled !== undefined ? { poolEnabled } : {}),
       ...(conversationMode !== undefined ? { conversationMode } : {}),
     },
   })
@@ -451,6 +456,117 @@ test('shim 上游错误透传为 502', async () => {
     const data = await response.json()
     assert.ok(data.error.message.includes('401'))
     assert.ok(data.error.message.includes('login required'))
+  } finally {
+    await shim.close()
+    await new Promise(resolve => mock.close(() => resolve()))
+  }
+})
+
+/** 可拒绝的 mock 上游：cookie 含 rejectCookie 子串的账号请求 → 403。 */
+async function startRejectingMockUpstream(requests, rejectCookie) {
+  return await new Promise(resolve => {
+    const server = http.createServer((req, res) => {
+      let raw = ''
+      req.on('data', chunk => { raw += chunk })
+      req.on('end', () => {
+        let body = {}
+        try { body = JSON.parse(raw) } catch {}
+        const cookie = String(req.headers.cookie ?? '')
+        requests.push({ url: req.url, headers: req.headers, body })
+        if (rejectCookie !== undefined && cookie.includes(rejectCookie)) {
+          res.writeHead(403, { 'Content-Type': 'text/plain' })
+          res.end('login expired')
+          return
+        }
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+        res.end(SSE_PAYLOAD)
+      })
+    })
+    server.listen(0, '127.0.0.1', () => resolve(server))
+  })
+}
+
+const ACCOUNT_A = { id: 'acct-a', label: 'A', ...CREDENTIAL, cookie: 'sessionid=aaa; sid_tt=x;' }
+const ACCOUNT_B = { id: 'acct-b', label: 'B', ...CREDENTIAL, cookie: 'sessionid=bbb; sid_tt=x;' }
+
+function postChat(shim, content) {
+  return fetch(`${shim.baseUrl()}/chat/completions`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${shim.token()}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: 'auto', messages: [{ role: 'user', content }] }),
+  })
+}
+
+test('shim 账号池：第一账号 403 自动转移到第二账号', async () => {
+  const requests = []
+  const mock = await startRejectingMockUpstream(requests, 'sessionid=aaa')
+  const shim = makeShim(mock.address().port, {
+    accountsOverride: [ACCOUNT_A, ACCOUNT_B],
+    poolEnabled: true,
+  })
+  await shim.start()
+  try {
+    const response = await postChat(shim, '你好')
+    assert.equal(response.status, 200)
+    const chunks = parseSse(await response.text())
+    assert.ok(chunks.some(chunk => chunk.choices?.[0]?.delta?.content))
+    // 两次上游请求：先 A（403）再 B（成功）
+    assert.equal(requests.length, 2)
+    assert.match(requests[0].headers.cookie, /sessionid=aaa/)
+    assert.match(requests[1].headers.cookie, /sessionid=bbb/)
+    // 成功后粘性锚点指向 B：下一新会话直接从 B 开始，不再撞 A
+    const second = await postChat(shim, '换个话题')
+    assert.equal(second.status, 200)
+    assert.equal(requests.length, 3)
+    assert.match(requests[2].headers.cookie, /sessionid=bbb/)
+  } finally {
+    await shim.close()
+    await new Promise(resolve => mock.close(() => resolve()))
+  }
+})
+
+test('shim 池关闭：第一账号失败后直接 502，不换号', async () => {
+  const requests = []
+  const mock = await startRejectingMockUpstream(requests, 'sessionid=aaa')
+  const shim = makeShim(mock.address().port, {
+    accountsOverride: [ACCOUNT_A, ACCOUNT_B],
+    poolEnabled: false,
+  })
+  await shim.start()
+  try {
+    const response = await postChat(shim, '你好')
+    assert.equal(response.status, 502)
+    assert.equal(requests.length, 1)
+    assert.match(requests[0].headers.cookie, /sessionid=aaa/)
+  } finally {
+    await shim.close()
+    await new Promise(resolve => mock.close(() => resolve()))
+  }
+})
+
+test('shim 会话绑定账号：账号被移除后旧会话不跨账号复用', async () => {
+  const requests = []
+  const pool = [ACCOUNT_A, ACCOUNT_B]
+  const mock = await startRejectingMockUpstream(requests)
+  const shim = makeShim(mock.address().port, {
+    accountsOverride: () => [...pool],
+    poolEnabled: true,
+  })
+  await shim.start()
+  try {
+    // 第一轮：A 成功，会话 conv-123 绑在 A
+    const first = await postChat(shim, '第一轮')
+    assert.equal(first.status, 200)
+    assert.equal(requests.length, 1)
+    assert.match(requests[0].headers.cookie, /sessionid=aaa/)
+    // 第二轮：A 从池中移除 → 只剩 B；旧会话属 A，不得带给 B
+    pool.shift()
+    const second = await postChat(shim, '第二轮')
+    assert.equal(second.status, 200)
+    assert.equal(requests.length, 2)
+    assert.match(requests[1].headers.cookie, /sessionid=bbb/)
+    // buildRequestBody 未带旧 conversation_id（重新建会话）
+    assert.ok(!requests[1].body.conversation_id, '换账号后不得携带旧账号的会话 id')
   } finally {
     await shim.close()
     await new Promise(resolve => mock.close(() => resolve()))

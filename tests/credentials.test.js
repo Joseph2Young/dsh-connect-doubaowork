@@ -8,6 +8,7 @@ import {
   loadCredentialsFromFile,
   loadCredentials,
   discoverCredentialsFromDoubaoApp,
+  loadAccountList,
   CREDENTIALS_FILE_ENV,
 } from '../credentials.js'
 
@@ -98,4 +99,51 @@ test('discoverCredentialsFromDoubaoApp 缺失/坏文件 → undefined', () => {
   assert.equal(discoverCredentialsFromDoubaoApp(path.join(os.tmpdir(), '不存在-x')), undefined)
   const empty = tmpFile('Local State', JSON.stringify({ saman: {} }))
   assert.equal(discoverCredentialsFromDoubaoApp(empty), undefined)
+})
+
+test('loadAccountList：插件配置主账号优先', () => {
+  const accounts = loadAccountList({
+    account: { id: 'primary', label: '主号', cookie: 'sessionid=a', deviceId: 'd1' },
+    autoDiscover: false,
+  })
+  assert.equal(accounts.length, 1)
+  assert.equal(accounts[0].id, 'primary')
+  assert.equal(accounts[0].label, '主号')
+  assert.equal(accounts[0].cookie, 'sessionid=a')
+  assert.equal(accounts[0].enabled, true)
+})
+
+test('loadAccountList：凭据文件 accounts 数组与旧单账号形状', () => {
+  const multi = tmpFile('credentials.json', JSON.stringify({
+    accounts: [
+      { id: 'a1', cookie: 'sessionid=1', device_id: 'd1' },
+      { id: 'a2', cookie: 'sessionid=2', enabled: false },
+      { cookie: 'sessionid=3' },
+    ],
+  }))
+  const accounts = loadAccountList({ credentialsFile: multi, autoDiscover: false })
+  assert.deepEqual(accounts.map(a => a.id), ['a1', 'a2', 'account-3'])
+  assert.equal(accounts[1].enabled, false)
+  assert.equal(accounts[2].localAppId, '582478')
+  // 旧单账号形状 → id=account-1
+  const legacy = tmpFile('credentials.json', JSON.stringify({ cookie: 'sessionid=legacy', web_id: 'w9' }))
+  const single = loadAccountList({ credentialsFile: legacy, autoDiscover: false })
+  assert.deepEqual(single.map(a => a.id), ['account-1'])
+  assert.equal(single[0].webId, 'w9')
+})
+
+test('loadAccountList：去重 / 无效 cookie 丢弃 / 自动发现兜底', () => {
+  // 同 id 跳过；无 sessionid 的条目丢弃
+  const dup = tmpFile('credentials.json', JSON.stringify({
+    accounts: [
+      { id: 'a1', cookie: 'sessionid=1' },
+      { id: 'a1', cookie: 'sessionid=2' },
+      { id: 'bad', cookie: 'no-session-here' },
+    ],
+  }))
+  const accounts = loadAccountList({ credentialsFile: dup, autoDiscover: false })
+  assert.deepEqual(accounts.map(a => a.id), ['a1'])
+  assert.equal(accounts[0].cookie, 'sessionid=1')
+  // 什么都没有 + autoDiscover=false → 空数组
+  assert.deepEqual(loadAccountList({ credentialsFile: path.join(os.tmpdir(), '不存在-x'), autoDiscover: false }), [])
 })

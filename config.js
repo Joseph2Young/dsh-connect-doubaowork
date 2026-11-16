@@ -15,6 +15,9 @@ export const DOUBAO_DEFAULTS = Object.freeze({
   // 豆包侧会话归属：single = 全部复用同一条豆包会话（默认，避免客户端窗口膨胀）；
   // per-chat = 每个 DSH 会话对应一条豆包记录
   conversationMode: 'single',
+  // 账号池故障转移与每日保活巡检：均 opt-in（默认关），不替用户改变请求行为
+  poolEnabled: false,
+  keepaliveEnabled: false,
   workMode: true,
   botId: '7338286299411103781',
   modeId: '3',
@@ -62,6 +65,16 @@ export function createConfigSchema(z) {
     heartbeatSeconds: z.number().default(DOUBAO_DEFAULTS.heartbeatSeconds).description('SSE 心跳间隔（秒）'),
     flattenHistory: z.boolean().default(DOUBAO_DEFAULTS.flattenHistory).description('首轮把历史消息压平为一段'),
     conversationMode: z.string().default(DOUBAO_DEFAULTS.conversationMode).description('豆包侧会话归属：single = 全部落进同一条豆包会话（默认）；per-chat = 每个 DSH 会话一条豆包记录'),
+    account: z.object({
+      id: z.string().default('').description('账号唯一 ID；留空由插件生成'),
+      label: z.string().default('').description('账号备注名'),
+      cookie: z.string().default('').description('完整 cookie 串（须含 sessionid=）'),
+      deviceId: z.string().default('').description('device_id'),
+      webId: z.string().default('').description('web_id'),
+      enabled: z.boolean().default(true).description('是否参与账号池调度'),
+    }).description('主账号（兼容旧单账号凭据；账号池的保底成员）'),
+    poolEnabled: z.boolean().default(DOUBAO_DEFAULTS.poolEnabled).description('账号池故障转移：请求失败时自动换下一个启用账号重试'),
+    keepaliveEnabled: z.boolean().default(DOUBAO_DEFAULTS.keepaliveEnabled).description('每日保活巡检：定时检查各账号 cookie 是否仍被豆包接受并记录健康状态（读操作，默认关）'),
   })
 }
 
@@ -102,5 +115,26 @@ export function normalizeConfig(config) {
     flattenHistory: pick('flattenHistory', DOUBAO_DEFAULTS.flattenHistory) !== false,
     // 只认 'per-chat'，其余一律回落 single（默认），避免配置笔误改变落库行为
     conversationMode: raw.conversationMode === 'per-chat' ? 'per-chat' : 'single',
+    // 主账号：config.account 形状收口（cookie 校验在 credentials.js，这里只做形状收口）
+    account: normalizeAccountShape(raw.account),
+    poolEnabled: pick('poolEnabled', DOUBAO_DEFAULTS.poolEnabled) === true,
+    keepaliveEnabled: pick('keepaliveEnabled', DOUBAO_DEFAULTS.keepaliveEnabled) === true,
+  }
+}
+
+/** 主账号形状收口：非对象 → 空对象；字段逐个收口为合法类型。 */
+export function normalizeAccountShape(value) {
+  const raw = value && typeof value === 'object' ? value : {}
+  const pick = (key, fallback) => {
+    const v = raw[key]
+    return v === undefined || v === null ? fallback : v
+  }
+  return {
+    id: typeof raw.id === 'string' ? raw.id.trim() : '',
+    label: typeof raw.label === 'string' ? raw.label : '',
+    cookie: typeof raw.cookie === 'string' ? raw.cookie.trim() : '',
+    deviceId: typeof (raw.deviceId ?? raw.device_id) === 'string' ? String(raw.deviceId ?? raw.device_id).trim() : '',
+    webId: typeof (raw.webId ?? raw.web_id) === 'string' ? String(raw.webId ?? raw.web_id).trim() : '',
+    enabled: pick('enabled', true) !== false,
   }
 }

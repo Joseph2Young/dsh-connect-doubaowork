@@ -107,6 +107,32 @@ pnpm add file:/绝对路径/dsh-connect-doubaowork
 | `heartbeatSeconds` | `15` | SSE 心跳间隔，`0` = 关闭 |
 | `flattenHistory` | `true` | 首轮把历史消息压平为一段 |
 | `conversationMode` | `"single"` | 豆包侧会话归属：`single` = 全部复用同一条豆包会话（默认）；`per-chat` = 每个 DSH 会话一条豆包记录 |
+| `account` | 空 | 主账号快捷配置（`cookie` / `deviceId` / `webId`），优先级低于凭据文件 |
+| `poolEnabled` | `false` | 账号池故障转移：当前账号上游失败时自动换下一个账号重试（多账号时生效） |
+| `keepaliveEnabled` | `false` | 每日保活巡检：定时检查各账号 Cookie 是否仍被豆包接受（见下文） |
+
+## 设置界面
+
+插件自带 DSH Web GUI 设置卡片（`dsh.client` 注入，无需构建）：在 **DSH 设置 → 插件 → 豆包工作模式** 中可读写网关选项（会话归属、工作模式、思考强度、超时等）、查看账号池健康状态、手动触发保活巡检。卡片对配置采用「草稿-保存」模式：改动先落在草稿，点「保存设置」才写回；健康状态为只读测量值（由巡检写入 `~/.dsh-doubao/pool-state.json`）。老版本宿主不提供设置插槽时，卡片自动降级或隐藏，不影响网关本体。
+
+## 账号池与保活巡检
+
+**多账号**：在 `~/.dsh-doubao/credentials.json` 里用 `accounts` 数组放置多个账号（也兼容旧的单账号形状）：
+
+```json
+{
+  "accounts": [
+    { "id": "a1", "label": "主号", "cookie": "sessionid=…; sid_tt=…;", "device_id": "…", "web_id": "…" },
+    { "id": "a2", "label": "备号", "cookie": "sessionid=…; sid_tt=…;" }
+  ]
+}
+```
+
+- **粘性轮换**：新会话默认从上一次成功的账号开始（`lastGoodId` 粘性锚点），避免每次都撞失效账号；
+- **故障转移**：`poolEnabled: true` 且多账号时，当前账号在「上游请求失败 / HTTP 非 2xx」阶段自动换下一个账号重试（流式响应已开始后不再换号——响应头已发出无法回退）；成功账号被记住，后续请求优先；
+- **会话与账号绑定**：豆包 `conversation_id` 是账号作用域的，会话换账号时会自动重新建会话，不会把 A 账号的会话 id 发给 B 账号。
+
+**每日保活巡检**（对应 workbuddy 的自动签到）：豆包没有「签到」概念，落地为等价的**保活巡检**——每日固定时刻（默认 08:30）用每个账号的 Cookie 向豆包首页发起一次只读探测（`redirect: manual`，不产生会话记录），结果写入 `~/.dsh-doubao/pool-state.json` 并可在设置卡片查看。注意这是弱验证：它只能发现「Cookie 被服务端拒绝」，不能确认账号额度仍然可用；默认关闭（`keepaliveEnabled: true` 开启），设置卡片可手动「立即巡检」。
 
 ## 关于豆包侧的会话记录
 
@@ -134,6 +160,7 @@ pnpm add file:/绝对路径/dsh-connect-doubaowork
 - **模型选择器里看不到豆包模型**：宿主需要重新组合 bundle，刷新页面或重启一次 DSH。
 - **回复被风控中断**：多为 Cookie 缺设备字段，改用手动导入的完整 Cookie。
 - **豆包回复以 `❓` 提问结尾**：这是工作模式的正常反问，在 DSH 里直接回答即可，回答会送回同一豆包会话继续执行（见上文「豆包反问如何回到 DSH」）。
+- **账号池没有切换**：确认 `poolEnabled: true` 且凭据文件里有多个有效账号（含 `sessionid=`）；流式响应已经开始后不会换号。
 
 ## 测试
 

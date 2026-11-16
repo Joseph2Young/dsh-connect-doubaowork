@@ -28,7 +28,7 @@ function randomToken() {
  * @param {object} options
  * @param {() => Array<{id:string}>} options.catalog 运行时目录
  * @param {(id: string) => object|undefined} options.resolveModel id/别名 → 目录条目
- * @param {() => object|undefined} options.credentials 凭据提供者
+ * @param {() => Array<object>} options.accounts 账号池提供者（loadAccountList 产物）
  * @param {(input: object) => object} options.buildBody 请求体构造（注入 doubao-protocol.buildRequestBody）
  * @param {(stream: object, sink: object) => Promise<void>} options.pump SSE 泵（注入 pumpSse）
  * @param {typeof fetch} [options.fetchImpl] 测试可注入
@@ -39,7 +39,7 @@ export function createDoubaoShim(options) {
   const {
     catalog,
     resolveModel,
-    credentials,
+    accounts,
     buildBody,
     pump,
     fetchImpl = fetch,
@@ -52,6 +52,8 @@ export function createDoubaoShim(options) {
   let port = 0
   let closed = false
   let conversations = new Map()
+  // 账号池粘性轮换锚点：上次成功请求的账号 id（'', 初始未定）
+  const state = { lastGoodId: '' }
 
   const ready = new Promise((resolve, reject) => {
     server = http.createServer((req, res) => {
@@ -152,13 +154,28 @@ export function createDoubaoShim(options) {
     return shortHash(`${payload?.model ?? ''}\u0000${firstUser}`)
   }
 
-  function rememberConversation(convKey, conversationId) {
+  function rememberConversation(convKey, conversationId, accountId) {
     if (conversationId === '') return
-    conversations.set(convKey, { conversationId })
+    conversations.set(convKey, { conversationId, accountId })
     while (conversations.size > MAX_CONVERSATIONS) {
       const oldest = conversations.keys().next().value
       conversations.delete(oldest)
     }
+  }
+
+  /**
+   * 账号池调度顺序：会话已绑定账号 → 绑定账号置首（豆包 conversation_id 是
+   * 账号作用域，换账号旧会话作废，必须粘住）；新会话 → 上次成功账号之后开始
+   * 轮转（粘性轮换，避免每次都从第一个账号起步把负载压在同一个账号上）。
+   */
+  function orderedAccounts(convKey) {
+    const all = Array.isArray(accounts?.()) ? accounts().filter(a => a?.enabled !== false && typeof a?.cookie === 'string' && a.cookie !== '') : []
+    if (all.length <= 1) return all
+    const boundId = conversations.get(convKey)?.accountId
+    const startId = boundId ?? state.lastGoodId
+    const head = startId === '' ? [] : all.filter(a => a.id === startId)
+    const rest = all.filter(a => a.id !== startId)
+    return [...head, ...rest]
   }
 
   function upstreamHeaders(credential) {
@@ -205,36 +222,18 @@ export function createDoubaoShim(options) {
       fail(res, 400, `未知模型: ${payload?.model}`)
       return
     }
-    const credential = credentials()
-    if (credential === undefined) {
-      fail(res, 503, '豆包凭据未配置：请创建 ~/.dsh-doubao/credentials.json（完整 cookie + device_id）')
-      return
-    }
-
     // single 模式下所有请求共用固定键 → 豆包侧只保留一条会话记录
     const convKey = defaults.conversationMode === 'single'
       ? SINGLE_CONVERSATION_KEY
       : conversationKey(payload, messages)
     const previous = conversations.get(convKey)
-    const conversationId = previous?.conversationId ?? ''
-
-    const body = buildBody({
-      messages,
-      modelItemKey: entry.modelItemKey,
-      options: { conversationId, flatten: defaults.flattenHistory, workMode: defaults.workMode },
-      work: {
-        botId: defaults.botId,
-        modeId: defaults.modeId,
-        reasoningEffort: defaults.reasoningEffort,
-        memoryProfile: defaults.memoryProfile,
-        totalWindowSize: defaults.totalWindowSize,
-        enableSandbox: defaults.enableSandbox,
-        workspace: defaults.workspace,
-        deviceName: 'USER',
-        localAppId: credential.localAppId,
-        localDeviceId: credential.deviceId,
-      },
-    })
+    const candidates = orderedAccounts(convKey)
+    if (candidates.length === 0) {
+      fail(res, 503, '豆包凭据未配置：请创建 ~/.dsh-doubao/credentials.json（完整 cookie + device_id），或在设置页添加账号')
+      return
+    }
+    // 池故障转移：只在「请求尚未触达成功响应」阶段换账号重试（流头已写则无法回退）
+    const pool = defaults.poolEnabled === true && candidates.length > 1
 
     const isStream = payload?.stream !== false
     const controller = new AbortController()
@@ -247,28 +246,76 @@ export function createDoubaoShim(options) {
       if (!finished) controller.abort(new Error('客户端断开'))
     })
 
-    let response
-    try {
-      response = await fetchImpl(buildUpstreamUrl(credential), {
-        method: 'POST',
-        headers: upstreamHeaders(credential),
-        body: JSON.stringify(body),
-        signal: controller.signal,
+    // 逐账号尝试：fetch 网络失败 / HTTP 非 2xx 时换下一个（AbortError 除外——
+    // 超时或客户端断开时连接已不可用，重试无意义）。成功（response.ok）即锁定
+    // 该账号：记 lastGoodId 供后续粘性轮换。
+    let response = null
+    let credential = null
+    let upstreamError = null
+    for (const candidate of candidates) {
+      // 会话复用仅限同一账号：豆包 conversation_id 是账号作用域的，
+      // 换账号必须重新建会话（conversationId 置空 → need_create_conversation=true）
+      const conversationId = previous?.accountId === candidate.id ? previous?.conversationId ?? '' : ''
+      const body = buildBody({
+        messages,
+        modelItemKey: entry.modelItemKey,
+        options: { conversationId, flatten: defaults.flattenHistory, workMode: defaults.workMode },
+        work: {
+          botId: defaults.botId,
+          modeId: defaults.modeId,
+          reasoningEffort: defaults.reasoningEffort,
+          memoryProfile: defaults.memoryProfile,
+          totalWindowSize: defaults.totalWindowSize,
+          enableSandbox: defaults.enableSandbox,
+          workspace: defaults.workspace,
+          deviceName: 'USER',
+          localAppId: candidate.localAppId,
+          localDeviceId: candidate.deviceId,
+        },
       })
-    } catch (error) {
+      let attempt
+      try {
+        attempt = await fetchImpl(buildUpstreamUrl(candidate), {
+          method: 'POST',
+          headers: upstreamHeaders(candidate),
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        })
+      } catch (error) {
+        const isAbort = error?.name === 'AbortError'
+        if (isAbort || !pool || candidate === candidates[candidates.length - 1]) {
+          finished = true
+          clearTimeout(timer)
+          const reason = isAbort ? (error?.cause?.message ?? '请求中断') : error?.message
+          fail(res, 502, `上游请求失败: ${reason}`)
+          return
+        }
+        log('warn', `账号 ${candidate.id} 请求失败，池故障转移尝试下一个: ${error?.message}`)
+        continue
+      }
+      if (!attempt.ok) {
+        const detail = (await attempt.text().catch(() => '')).trim().slice(0, 4096)
+        if (!pool || candidate === candidates[candidates.length - 1]) {
+          finished = true
+          clearTimeout(timer)
+          fail(res, 502, `上游 HTTP ${attempt.status}${detail === '' ? '' : `: ${detail}`}`)
+          return
+        }
+        log('warn', `账号 ${candidate.id} 上游 HTTP ${attempt.status}，池故障转移尝试下一个`)
+        continue
+      }
+      response = attempt
+      credential = candidate
+      state.lastGoodId = candidate.id
+      break
+    }
+    if (response === null || credential === null) {
       finished = true
       clearTimeout(timer)
-      const reason = error?.name === 'AbortError' ? (error?.cause?.message ?? '请求中断') : error?.message
-      fail(res, 502, `上游请求失败: ${reason}`)
+      fail(res, 502, '账号池全部账号请求失败')
       return
     }
-    if (!response.ok) {
-      finished = true
-      clearTimeout(timer)
-      const detail = (await response.text().catch(() => '')).trim().slice(0, 4096)
-      fail(res, 502, `上游 HTTP ${response.status}${detail === '' ? '' : `: ${detail}`}`)
-      return
-    }
+    if (finished) return
     if (isStream) {
       // OpenAI 兼容流式响应头；flushHeaders 让 content-type 在首个 delta 前就绪
       res.writeHead(200, {
@@ -304,7 +351,7 @@ export function createDoubaoShim(options) {
         if (isStream) writeDelta({ reasoning_content: text })
       },
       onConversation(conversation, section) {
-        rememberConversation(convKey, conversation || '')
+        rememberConversation(convKey, conversation || '', credential.id)
       },
       onClarify(titles) {
         // 豆包工作模式反问：把问题文本转成正文流给调用方，然后主动断开上游。

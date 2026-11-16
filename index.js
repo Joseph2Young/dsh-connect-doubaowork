@@ -8,10 +8,12 @@
 import z from '@deepseek-ai/schemastery'
 import { createConfigSchema, normalizeConfig, DOUBAO_DEFAULTS, DOUBAO_QUERY, DOUBAO_SETTINGS_NS } from './config.js'
 import { DOUBAO_PROVIDER, DOUBAO_PROVIDER_DISPLAY_NAME, DOUBAO_DEFAULT_MODEL, deriveCatalog, resolveModel } from './catalog.js'
-import { loadCredentials } from './credentials.js'
+import { loadAccountList } from './credentials.js'
 import { buildRequestBody, pumpSse } from './doubao-protocol.js'
 import { createDoubaoShim } from './shim.js'
 import { createDoubaoAdapter } from './adapter.js'
+import { createKeepalive } from './keepalive.js'
+import { registerPluginRoutes } from './routes.js'
 import { bootstrap } from './plugin.js'
 
 export const name = 'dsh-connect-doubaowork'
@@ -30,7 +32,9 @@ export function apply(ctx, config) {
   // 目录每次现读活配置；normalizeConfig 是 apply 期快照，volatile 变更随重挂生效
   const enabledIds = () => (Array.isArray(config?.enabledModelIds) ? config.enabledModelIds.map(String) : normalized.enabledModelIds)
   const models = () => deriveCatalog(enabledIds())
-  const credentials = () => loadCredentials({
+  // 账号池装配：插件配置主账号 → 凭据文件（数组或旧单账号）→ 自动发现
+  const accounts = () => loadAccountList({
+    account: config?.account ?? normalized.account,
     credentialsFile: typeof config?.credentialsFile === 'string' ? config.credentialsFile : normalized.credentialsFile,
     autoDiscover: config?.autoDiscoverCredentials !== false,
   })
@@ -38,7 +42,7 @@ export function apply(ctx, config) {
   const shim = createDoubaoShim({
     catalog: models,
     resolveModel,
-    credentials,
+    accounts,
     buildBody: buildRequestBody,
     pump: pumpSse,
     defaults: {
@@ -53,8 +57,40 @@ export function apply(ctx, config) {
       flattenHistory: normalized.flattenHistory,
       workMode: normalized.workMode,
       conversationMode: normalized.conversationMode,
+      poolEnabled: normalized.poolEnabled,
     },
     log,
+  })
+
+  // 每日保活巡检：opt-in（配置开关），手动按钮与定时器共用同一个巡检器
+  const keepalive = createKeepalive({
+    accounts,
+    log,
+    userAgent: normalized.userAgent,
+    enabled: normalized.keepaliveEnabled,
+  })
+  ctx.effect(() => () => {
+    keepalive.stop()
+  })
+  keepalive.schedule()
+
+  // 插件路由：设置卡片读账号健康状态、手动触发巡检（webServer 缺席则降级）
+  const disposeRoutes = registerPluginRoutes(ctx, {
+    status: () => ({
+      accounts: accounts().map(account => ({
+        id: account.id,
+        label: account.label,
+        enabled: account.enabled !== false,
+        health: keepalive.readState().results?.[account.id] ?? null,
+      })),
+      poolEnabled: normalized.poolEnabled,
+      keepaliveEnabled: normalized.keepaliveEnabled,
+      lastRun: keepalive.readState().lastRun ?? null,
+    }),
+    runKeepalive: () => keepalive.runNow('manual'),
+  })
+  ctx.effect(() => () => {
+    disposeRoutes?.()
   })
 
   let stopped = false

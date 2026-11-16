@@ -24,7 +24,9 @@ function makeFakeZ() {
   }
   z.object = defs => {
     z.fields = defs
-    return { ...defs }
+    const obj = { ...defs }
+    obj.description = () => obj
+    return obj
   }
   return z
 }
@@ -36,7 +38,7 @@ test('createConfigSchema 字段种类与默认值', () => {
   assert.deepEqual(Object.keys(fields), [
     'enabledModelIds', 'workMode', 'reasoningEffort', 'autoDiscoverCredentials',
     'credentialsFile', 'chatUrl', 'userAgent', 'timeoutSeconds', 'heartbeatSeconds', 'flattenHistory',
-    'conversationMode',
+    'conversationMode', 'account', 'poolEnabled', 'keepaliveEnabled',
   ])
   assert.equal(fields.enabledModelIds.kind, 'array')
   assert.deepEqual(fields.enabledModelIds.defaultValue, [])
@@ -52,6 +54,9 @@ test('createConfigSchema 字段种类与默认值', () => {
   assert.equal(fields.autoDiscoverCredentials.defaultValue, true)
   assert.equal(fields.conversationMode.kind, 'string')
   assert.equal(fields.conversationMode.defaultValue, DOUBAO_DEFAULTS.conversationMode)
+  assert.equal(fields.poolEnabled.defaultValue, false)
+  assert.equal(fields.keepaliveEnabled.defaultValue, false)
+  assert.equal(typeof fields.account, 'object')
 })
 
 test('normalizeConfig 空配置 → 全默认', () => {
@@ -94,6 +99,27 @@ test('clampEffort 只放行 0-4', () => {
   assert.equal(clampEffort('9'), '4')
   assert.equal(clampEffort('abc'), '4')
   assert.equal(clampEffort(undefined), '4')
+})
+
+test('normalizeConfig 账号/池/保活字段收口', () => {
+  // 默认：池与保活均关闭（opt-in），主账号空形状
+  const defaults = normalizeConfig(undefined)
+  assert.deepEqual(defaults.account, { id: '', label: '', cookie: '', deviceId: '', webId: '', enabled: true })
+  assert.equal(defaults.poolEnabled, false)
+  assert.equal(defaults.keepaliveEnabled, false)
+  // 显式开启
+  assert.equal(normalizeConfig({ poolEnabled: true }).poolEnabled, true)
+  assert.equal(normalizeConfig({ keepaliveEnabled: true }).keepaliveEnabled, true)
+  // 非真值一律收口为 false
+  assert.equal(normalizeConfig({ poolEnabled: 'yes' }).poolEnabled, false)
+  assert.equal(normalizeConfig({ keepaliveEnabled: 1 }).keepaliveEnabled, false)
+  // 主账号字段收口：snake_case 兼容 + enabled 非 false 视为 true
+  const account = normalizeConfig({ account: { cookie: 'sessionid=a', device_id: 'd1', enabled: false } }).account
+  assert.equal(account.cookie, 'sessionid=a')
+  assert.equal(account.deviceId, 'd1')
+  assert.equal(account.enabled, false)
+  // 非对象 account → 空形状
+  assert.deepEqual(normalizeConfig({ account: 'x' }).account.cookie, '')
 })
 
 test('上游 query 常量完整', () => {
