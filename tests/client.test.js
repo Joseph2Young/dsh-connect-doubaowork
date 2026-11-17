@@ -139,3 +139,14 @@ test('client bundle：卡片渲染核心分组（无 JSX，纯 createElement 树
   assert.match(flat, /账号池/)
   assert.match(flat, /每日保活巡检/)
 })
+
+test('声明 dsh.client 的包必须在 exports 暴露 ./client 且目标文件存在（宿主冷启动硬校验）', () => {
+  const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  if (pkg.dsh?.client) {
+    const target = pkg.exports?.['./client']
+    assert.ok(typeof target === 'string', 'exports["./client"] 缺失：宿主 client-modules 会拒绝组合并使整个 host-boot 失败')
+    const resolved = new URL(`../${target.replace(/^\.\//, '')}`, import.meta.url)
+    assert.ok(fs.existsSync(resolved), `exports["./client"] 指向的文件不存在: ${target}`)
+    assert.ok(CLIENT_SOURCE.includes('__ModuleLoader__'), '客户端 bundle 应保持宿主 ModuleLoader 加载格式')
+  }
+})
