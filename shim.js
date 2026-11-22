@@ -16,6 +16,7 @@
 import http from 'node:http'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { extractText, shortHash } from './doubao-protocol.js'
+import { upstreamId } from './catalog.js'
 
 const CHAT_PATH = '/v1/chat/completions'
 const MODELS_PATH = '/v1/models'
@@ -330,8 +331,10 @@ export function createDoubaoShim(options) {
     try {
       outcome = await cli.run({
         prompt,
-        // 模型：CLI 用模型 ID 直传；目录里的 id 就是 CLI 的 modelId
-        model: entry.id === 'auto' ? '' : entry.id,
+        // 模型：CLI 只认自己的上游 id（`doubao model list` 报的 person-*），
+        // 目录里的 id 是我们给用户看的友好名（deepseek-v4-flash），不能直传。
+        // auto 交给 CLI 自己挑默认模型。
+        model: entry.id === 'auto' ? '' : upstreamId(entry, 'cli'),
         effort: defaults.cliEffort ?? '',
         sessionId: boundSession,
         signal: controller.signal,

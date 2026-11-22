@@ -99,9 +99,10 @@ test('CLI 后端：无 Cookie 也能出流（含 session 绑定与 SSE 形状）
       {},
     ])
     assert.equal(chunks[chunks.length - 1].choices[0].finish_reason, 'stop')
+    // 响应里回的是目录友好 id（用户看到的），CLI 侧拿到的是上游 id
     assert.equal(chunks[0].model, 'deepseek-v4-flash')
-    // CLi 侧拿到的任务：模型直传、首轮无 sessionId、prompt 是 user 文本
-    assert.equal(cli.calls[0].model, 'deepseek-v4-flash')
+    // CLI 只认自己的上游 id：友好名 deepseek-v4-flash → person-deepseek-v4-1-flash-261017
+    assert.equal(cli.calls[0].model, 'person-deepseek-v4-1-flash-261017')
     assert.equal(cli.calls[0].sessionId, '')
     assert.equal(cli.calls[0].prompt, '用户：打个招呼')
   } finally {
