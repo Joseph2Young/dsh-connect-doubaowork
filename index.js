@@ -16,6 +16,7 @@ import { createKeepalive } from './keepalive.js'
 import { createCliClient, fetchCliModels, probeCli } from './cli-backend.js'
 import { inspectSetup, formatSetupGuide } from './onboarding.js'
 import { registerPluginRoutes } from './routes.js'
+import { createLoginManager } from './login.js'
 import { bootstrap } from './plugin.js'
 
 export const name = 'dsh-connect-doubaowork'
@@ -106,6 +107,15 @@ export function apply(ctx, config) {
     }
   }
 
+  // 扫码登录管理器：把 `doubao login --qr=png` 的二维码搬进设置卡片。
+  // 子进程生命周期由卸载时统一回收（见下方 ctx.effect）。
+  const login = createLoginManager({
+    cliPath,
+    log,
+    // 探测用同一套 probeCli，保证卡片上的 CLI 状态与登录判定同源
+    probe: options => probeCli(options),
+  })
+
   const shim = createDoubaoShim({
     catalog: models,
     resolveModel,
@@ -164,12 +174,24 @@ export function apply(ctx, config) {
       cli: { ...cliState, models: cliModels.map(model => model.id) },
       // 首次使用引导快照（不含任何凭据内容）
       setup: setupState,
+      // 进行中的扫码登录（只报有无与剩余时间，二维码字节不进 status）
+      login: login.snapshot(),
     }),
     runKeepalive: () => keepalive.runNow('manual'),
     refreshCli: () => refreshCli(),
     refreshSetup: () => refreshSetup(),
+    login: {
+      start: () => login.start(),
+      poll: id => login.poll(id),
+      cancel: () => login.cancel(),
+    },
   })
   ctx.effect(() => () => {
+    // 插件卸载/重载时先取消扫码登录，避免留下孤儿 doubao login 子进程
+    // （CLI 有单实例锁，孤儿进程会让用户后续所有登录都报 conflict）
+    try {
+      login.cancel()
+    } catch {}
     disposeRoutes?.()
   })
 

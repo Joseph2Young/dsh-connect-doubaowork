@@ -26,6 +26,11 @@ window.__ModuleLoader__.load({
     const KEEPALIVE_RUN_PATH = '/plugins/dsh-connect-doubaowork/keepalive/run'
     const CLI_REFRESH_PATH = '/plugins/dsh-connect-doubaowork/cli/refresh'
     const SETUP_PATH = '/plugins/dsh-connect-doubaowork/setup'
+    const LOGIN_START_PATH = '/plugins/dsh-connect-doubaowork/login/start'
+    const LOGIN_POLL_PATH = '/plugins/dsh-connect-doubaowork/login/poll'
+    const LOGIN_CANCEL_PATH = '/plugins/dsh-connect-doubaowork/login/cancel'
+    /** 登录轮询节奏：1.5s 一轮，扫码成功后最迟这么久就能反馈（对齐 workbuddy 的做法）。 */
+    const LOGIN_POLL_INTERVAL_MS = 1500
 
     const COPY = {
       zh: {
@@ -85,6 +90,20 @@ window.__ModuleLoader__.load({
         'setup.pending': '尚未检查',
         'setup.fix': '修复步骤：',
         'setup.warn': '注意：',
+        'group.login': '扫码登录豆包 CLI',
+        'login.desc': '用豆包手机 App 扫码登录。登录态由豆包 CLI 自己保存，插件不读取、不存储任何凭据。',
+        'action.login': '扫码登录',
+        'action.loginAgain': '重新扫码登录',
+        'login.starting': '正在获取二维码…',
+        'login.waiting': '请用豆包 App 扫码（%ss）',
+        'login.success': '登录成功，CLI 后端可用',
+        'login.expired': '二维码已过期，请重新获取',
+        'login.cancel': '取消',
+        'login.close': '关闭',
+        'login.failed': '获取二维码失败',
+        'login.loggedIn': '已登录',
+        'login.notLoggedIn': '未登录',
+        'login.active': '扫码登录进行中',
         'hint.cli': 'CLI 后端走豆包官方 CLI 的登录态（doubao login 扫码一次），不依赖桌面端 cookie；它还自带工具执行与本地文件能力。HTTP 后端复用桌面端 cookie，约 30 天过期。',
         'group.hint': '说明',
         'hint.keepalive': '豆包没有「签到」概念，保活巡检为等价功能：每日定时验证各账号 cookie 是否仍被豆包接受。纯读操作，不产生会话记录。',
@@ -168,6 +187,9 @@ window.__ModuleLoader__.load({
       const [probing, setProbing] = react.useState(false)
       const [refreshing, setRefreshing] = react.useState(false)
       const [checking, setChecking] = react.useState(false)
+      // 扫码登录本地状态机：idle → starting → waiting → success | error
+      // 只放浏览器侧的展示状态，二维码字节与 loginId 都来自 Host 的 start 响应
+      const [login, setLogin] = react.useState({ phase: 'idle' })
 
       const value = draft ?? config
       const dirty = draft !== null
@@ -241,6 +263,87 @@ window.__ModuleLoader__.load({
           setChecking(false)
         }
       }
+
+      /**
+       * 开始一次扫码登录：Host 拉起 `doubao login --qr=png` 并回 data URL。
+       * 失败（未装 CLI / 已有登录在进行 / 输出不支持）都在这里落地成可读文案。
+       */
+      const startLogin = async () => {
+        setLogin({ phase: 'starting' })
+        try {
+          const response = await fetch(LOGIN_START_PATH, { method: 'POST', headers: { accept: 'application/json' } })
+          const data = await response.json()
+          if (data?.ok === true && typeof data.imageDataUrl === 'string' && data.imageDataUrl !== '') {
+            setLogin({
+              phase: 'waiting',
+              loginId: data.loginId,
+              imageDataUrl: data.imageDataUrl,
+              expiresAt: Date.now() + Math.max(1, Number(data.expiresInSeconds ?? 300)) * 1000,
+            })
+            return
+          }
+          setLogin({ phase: 'error', error: String(data?.error ?? t('login.failed')) })
+        } catch (error) {
+          setLogin({ phase: 'error', error: String(error?.message ?? error) })
+        }
+      }
+
+      /** 取消进行中的登录（同时杀掉 Host 侧子进程）。 */
+      const cancelLogin = async () => {
+        const active = login.loginId
+        setLogin({ phase: 'idle' })
+        if (typeof active !== 'string') return
+        try {
+          await fetch(LOGIN_CANCEL_PATH, {
+            method: 'POST',
+            headers: { accept: 'application/json', 'content-type': 'application/json' },
+            body: JSON.stringify({ loginId: active }),
+          })
+        } catch {}
+      }
+
+      /**
+       * 轮询登录结果。
+       *
+       * 用 effect + 定时器而不是自己写循环：卸载时 clearInterval 就能停，
+       * 不会留下悬空请求。成功后补一次 status 刷新，把 CLI 区块切成已登录。
+       */
+      react.useEffect(() => {
+        if (login.phase !== 'waiting' || typeof login.loginId !== 'string') return undefined
+        let alive = true
+        let timer = undefined
+        const tick = async () => {
+          try {
+            const response = await fetch(LOGIN_POLL_PATH, {
+              method: 'POST',
+              headers: { accept: 'application/json', 'content-type': 'application/json' },
+              body: JSON.stringify({ loginId: login.loginId }),
+            })
+            if (!response.ok) return
+            const data = await response.json()
+            if (!alive) return
+            if (data?.done === true) {
+              if (data.loggedIn === true) {
+                setLogin({ phase: 'success' })
+                // 登录态变了：把 CLI 状态与引导一并刷新，卡片即时变成「已登录」
+                void refreshCli()
+                void refreshSetup()
+                return
+              }
+              setLogin({ phase: 'error', error: String(data?.error ?? t('login.expired')) })
+              return
+            }
+          } catch {
+            // 网络抖动不算失败：下一轮继续问
+          }
+        }
+        timer = setInterval(() => { void tick() }, LOGIN_POLL_INTERVAL_MS)
+        void tick()
+        return () => {
+          alive = false
+          if (timer !== undefined) clearInterval(timer)
+        }
+      }, [login.phase, login.loginId])
 
       const rowStyle = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', padding: '6px 0' }
       const labelStyle = { flex: '0 0 auto', maxWidth: '60%' }
@@ -419,6 +522,59 @@ window.__ModuleLoader__.load({
       rows.push(h('div', { key: 'clirefresh', style: rowStyle },
         h('button', { type: 'button', disabled: refreshing, onClick: refreshCli }, refreshing ? t('action.refreshing') : t('action.refreshCli')))
       )
+
+      // —— 扫码登录（把 doubao login 的二维码搬进卡片）——
+      // 只在服务端提供了 login 能力时渲染：status.login 缺席说明宿主没装配，
+      // 此时给一个会失败的按钮比不显示更糟。
+      const loginState = status?.login
+      if (loginState !== null && loginState !== undefined) {
+        rows.push(h('div', { key: 'gl', style: sectionTitle }, t('group.login')))
+        rows.push(h('div', {
+          key: 'gld',
+          style: { opacity: 0.7, fontSize: '0.85em', lineHeight: 1.5, marginBottom: 6 },
+        }, t('login.desc')))
+
+        const loggedIn = cli?.loggedIn === true
+        if (login.phase === 'waiting') {
+          // 二维码本体：src 为 Host 转好的 data URL，不引入任何外部图片请求
+          rows.push(h('div', {
+            key: 'qr',
+            style: { display: 'flex', justifyContent: 'center', padding: '8px 0' },
+          }, h('img', {
+            src: login.imageDataUrl,
+            alt: t('login.waiting').replace('%s', ''),
+            width: 220,
+            height: 220,
+            style: { width: '220px', height: '220px', borderRadius: '8px', background: '#fff', padding: '8px' },
+          })))
+          const left = Math.max(0, Math.ceil(((login.expiresAt ?? 0) - Date.now()) / 1000))
+          rows.push(h('div', {
+            key: 'qrw',
+            style: { textAlign: 'center', fontSize: '0.88em', opacity: 0.85 },
+          }, t('login.waiting').replace('%s', String(left))))
+          rows.push(h('div', { key: 'qrc', style: rowStyle },
+            h('button', { type: 'button', onClick: () => { void cancelLogin() } }, t('login.cancel'))))
+        } else if (login.phase === 'starting') {
+          rows.push(h('div', { key: 'qrs', style: { opacity: 0.7, fontSize: '0.88em' } }, t('login.starting')))
+        } else if (login.phase === 'success') {
+          rows.push(h('div', { key: 'qrok', style: rowStyle },
+            h('span', { style: { color: '#16a34a', fontSize: '0.9em' } }, `✓ ${t('login.success')}`),
+            h('button', { type: 'button', onClick: () => { void startLogin() } }, t('action.loginAgain'))))
+        } else {
+          // idle 或 error
+          if (login.phase === 'error') {
+            rows.push(h('div', {
+              key: 'qrerr',
+              style: { color: '#dc2626', fontSize: '0.85em', lineHeight: 1.5, marginBottom: 4 },
+            }, `${t('login.failed')}：${login.error}`))
+          }
+          rows.push(h('div', { key: 'qrbtn', style: rowStyle },
+            h('span', { style: { fontSize: '0.85em', opacity: 0.75 } },
+              loggedIn ? `${t('login.loggedIn')}（${t('action.loginAgain')}）` : t('login.notLoggedIn')),
+            h('button', { type: 'button', onClick: () => { void startLogin() } },
+              loggedIn ? t('action.loginAgain') : t('action.login'))))
+        }
+      }
 
       // —— 账号池健康（只读测量值 + 手动巡检）——
       rows.push(h('div', { key: 'g2', style: sectionTitle }, t('group.accounts')))

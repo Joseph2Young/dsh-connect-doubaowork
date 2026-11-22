@@ -274,6 +274,39 @@ test('client bundle：接入可用时引导显示 ✓ 而不是报警', async ()
   assert.doesNotMatch(flat, /尚未配置完成/)
 })
 
+test('client bundle：登录区块在 status.login 缺席时整块不渲染', async () => {
+  // 宿主没装配登录能力时给一个会失败的按钮比不显示更糟
+  const flat = await renderCardWithStatus({
+    cli: { installed: true, version: '2.37.2', loggedIn: false, models: [] },
+    setup: { ready: false, pending: true, steps: [], summary: {} },
+  })
+  assert.doesNotMatch(flat, /扫码登录豆包 CLI/)
+})
+
+test('client bundle：未登录时登录区块给出「扫码登录」入口', async () => {
+  const flat = await renderCardWithStatus({
+    cli: { installed: true, version: '2.37.2', loggedIn: false, models: [] },
+    login: { active: false },
+    setup: { ready: false, pending: true, steps: [], summary: {} },
+  })
+  assert.match(flat, /扫码登录豆包 CLI/)
+  assert.match(flat, /未登录/)
+  assert.match(flat, /扫码登录/)
+  // 说明必须写明「插件不读取、不存储任何凭据」
+  assert.match(flat, /不读取、不存储任何凭据/)
+})
+
+test('client bundle：已登录时入口变成「重新扫码登录」', async () => {
+  const flat = await renderCardWithStatus({
+    cli: { installed: true, version: '2.37.2', loggedIn: true, models: ['doubao-2.1-pro'] },
+    login: { active: false },
+    setup: { ready: true, pending: false, steps: [], summary: {} },
+  })
+  assert.match(flat, /扫码登录豆包 CLI/)
+  assert.match(flat, /已登录/)
+  assert.match(flat, /重新扫码登录/)
+})
+
 test('声明 dsh.client 的包必须在 exports 暴露 ./client 且目标文件存在（宿主冷启动硬校验）', () => {
   const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   if (pkg.dsh?.client) {

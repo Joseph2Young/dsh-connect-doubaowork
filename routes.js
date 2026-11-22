@@ -10,11 +10,47 @@ export const PLUGIN_STATUS_PATH = '/plugins/dsh-connect-doubaowork/status'
 export const PLUGIN_SETUP_PATH = '/plugins/dsh-connect-doubaowork/setup'
 export const PLUGIN_KEEPALIVE_RUN_PATH = '/plugins/dsh-connect-doubaowork/keepalive/run'
 export const PLUGIN_CLI_REFRESH_PATH = '/plugins/dsh-connect-doubaowork/cli/refresh'
+export const PLUGIN_LOGIN_START_PATH = '/plugins/dsh-connect-doubaowork/login/start'
+export const PLUGIN_LOGIN_POLL_PATH = '/plugins/dsh-connect-doubaowork/login/poll'
+export const PLUGIN_LOGIN_CANCEL_PATH = '/plugins/dsh-connect-doubaowork/login/cancel'
 
 function json(res, status, payload) {
   if (res.writableEnded || res.destroyed) return
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' })
   res.end(JSON.stringify(payload))
+}
+
+/**
+ * 读取并解析请求体（上限 64KB）。
+ * 用于登录 poll：body 里只有 loginId，超限即视为异常请求。
+ */
+function readJsonBody(req, limit = 64 * 1024) {
+  return new Promise((resolve, reject) => {
+    let size = 0
+    const chunks = []
+    req.on('data', chunk => {
+      size += chunk.length
+      if (size > limit) {
+        reject(new Error('请求体过大'))
+        req.destroy?.()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => {
+      const text = Buffer.concat(chunks).toString('utf8').trim()
+      if (text === '') {
+        resolve({})
+        return
+      }
+      try {
+        resolve(JSON.parse(text))
+      } catch {
+        reject(new Error('请求体不是合法 JSON'))
+      }
+    })
+    req.on('error', reject)
+  })
 }
 
 /** 仅接受本机回环来源（防御 DNS rebinding / 跨源读取）。 */
@@ -118,6 +154,44 @@ export function registerPluginRoutes(ctx, deps) {
         }
       },
     })
+  }
+
+  /**
+   * 登录三条路由（start/poll/cancel）共用的 POST 处理器工厂：
+   * 方法闸 → loopback 闸 → 调 deps 里的动作 → json。
+   * 抽出来是因为三者的差异只有「调哪个函数、要不要读 body」。
+   */
+  const loginRoute = (path, action, readBody = false) => {
+    if (typeof action !== 'function') return
+    route({
+      kind: 'exact',
+      path,
+      handler: async (req, res) => {
+        if (req.method !== 'POST') {
+          json(res, 405, { error: 'method not allowed' })
+          return
+        }
+        if (!requireLoopback(req)) {
+          json(res, 403, { error: 'loopback only' })
+          return
+        }
+        try {
+          let payload
+          if (readBody) payload = await readJsonBody(req)
+          json(res, 200, await action(payload))
+        } catch (error) {
+          json(res, 500, { error: error?.message ?? String(error) })
+        }
+      },
+    })
+  }
+
+  // 扫码登录：把 `doubao login --qr=png` 的二维码搬到卡片里。
+  // start 拉起子进程并回 data URL；poll 轮询是否已登录；cancel 取消并杀进程。
+  if (deps.login && typeof deps.login === 'object') {
+    loginRoute(PLUGIN_LOGIN_START_PATH, deps.login.start)
+    loginRoute(PLUGIN_LOGIN_POLL_PATH, body => deps.login.poll(String(body?.loginId ?? '')), true)
+    loginRoute(PLUGIN_LOGIN_CANCEL_PATH, () => deps.login.cancel())
   }
 
   return () => {

@@ -30,6 +30,7 @@ DSH 宿主 ──pi-ai──▶ 本地回环网关 ──┤   （构造工作�
 | `adapter.js` | `createProvider` + `openAICompletionsApi` + `PiAiAdapter` 装配 |
 | `catalog.js` | 模型目录（静态 10 个 + CLI 动态清单合并，含别名） |
 | `credentials.js` | 豆包登录态加载（手动导入 / 桌面端自动发现） |
+| `login.js` | 扫码登录：拉起 `doubao login --qr=png`、读二维码 PNG 转 data URL、轮询登录态、取消与进程回收 |
 | `onboarding.js` | 首次使用引导：探测接入方式、生成修复步骤（只读、无凭据输出） |
 | `config.js` | 配置 schema 与默认常量 |
 | `plugin.js` | 宿主注册编排（adapter → 目录 → discovery，含失败回收） |
@@ -105,6 +106,8 @@ doubao login            # 扫码一次，登录态长期有效
 
 装完点卡片上的「重新检查接入方式」，或重启 DSH，`backend: auto` 会自动从 HTTP 切到 CLI。
 
+**不想开终端？** 装好 CLI 后，卡片上的「扫码登录豆包 CLI」区块可以直接出二维码——见下节。
+
 引导只做只读探测（读凭据文件形状、拉两个 CLI 子进程），**不写任何文件、不改配置、不采集也不上报任何机器信息**。
 
 ## 豆包 CLI 后端（推荐）
@@ -129,6 +132,24 @@ doubao model list                 # 可选：确认能列出模型
 - CLI 走自己的 passport 登录体系，**不复用**桌面端 cookie，所以两条路线各需各自的登录；
 - CLI 自带的工具执行/本地文件能力目前只记日志（不作为 OpenAI `tool_calls` 回给宿主），权限由 `cliPermissionMode` 控制；oneshot 模式下遇到需要审批的交互会被自动拒绝并继续，拒绝详情记录在日志里；
 - 首次消息上限 262144 字符（CLI 侧限制），超长历史需靠 `flattenHistory` 压缩。
+
+## 在设置界面里扫码登录（无需终端）
+
+设置 → 插件 → 豆包工作模式 → **扫码登录豆包 CLI** 区块，点「扫码登录」即在卡片里显示二维码：
+
+1. 点「扫码登录」——Host 在后台拉起 `doubao login --qr=png`，读回它生成的临时 PNG，转成 data URL 回给卡片；
+2. 用豆包手机 App 扫描卡片里的二维码并在手机上确认；
+3. 卡片每 1.5 秒轮询一次登录结果，成功后自动刷新「豆包 CLI」与「首次使用引导」两个区块，CLI 后端立刻可用；
+4. 二维码约 5 分钟过期，过期或想换账号点「重新扫码登录」；点「取消」会立刻杀掉后台的登录进程。
+
+**几个实现上的取舍**（都对使用者可见，所以写在这里）：
+
+- 卡片里显示的是**图片字节**（`data:image/png;base64,...`），不是文件路径，也不发起任何外部图片请求；返回前会校验 PNG 魔数，非 PNG 文件一律不当作二维码回传，避免把任意文件读成图片。
+- 判定「登录成功」用 `doubao auth status` 的返回值，而不是去解析登录进程的输出文案——后者的措辞在不同 CLI 版本里会变，而 `auth status` 是稳定契约。
+- 豆包 CLI 有**单实例锁**：如果终端里已经有一次 `doubao login` 在等待，卡片这边会立刻收到「已有登录正在进行」，而不是静默卡住。同理，重复点「扫码登录」会复用同一个二维码，不会开第二个进程。
+- 插件卸载或重载时会先取消进行中的扫码登录，避免留下孤儿 `doubao login` 进程——孤儿进程会让后续所有登录都撞锁失败。
+- 三种路由（`/login/start`、`/login/poll`、`/login/cancel`）与其它插件路由一样**只接受 loopback 来源**，并且只做 POST。
+- 插件**不读取、不存储**任何凭据：二维码是 CLI 自己生成的一次性图片，登录态由 CLI 保存在它自己的目录里。
 
 ## 凭据配置
 
@@ -192,6 +213,8 @@ HTTP 后端需要豆包登录态；如果只用 CLI 后端（`backend: "cli"`）
 卡片顶部还有「首次使用引导」区块（见上文），显示三步状态灯与修复命令，并提供「重新检查接入方式」按钮（`POST /plugins/dsh-connect-doubaowork/setup`）。
 
 卡片对配置采用「草稿-保存」模式：改动先落在草稿，点「保存设置」才写回；健康状态为只读测量值（由巡检写入 `~/.dsh-doubao/pool-state.json`）。老版本宿主不提供设置插槽时，卡片自动降级或隐藏，不影响网关本体。
+
+卡片上的区块顺序：首次使用引导 → 网关选项 → 豆包 CLI（安装态/登录态/模型清单）→ **扫码登录** → 账号池 → 说明。
 
 ## 账号池与保活巡检
 
@@ -264,13 +287,30 @@ HTTP 后端需要豆包登录态；如果只用 CLI 后端（`backend: "cli"`）
 
 日志脱敏约定：插件在任何日志、错误信息、引导输出里**都不打印 Cookie、token、device_id 的实际取值**；引导只报告「有无 / 能否解析 / 账号数」这类形状信息，并有专门的回归用例（`tests/onboarding.test.js` 的「summary 不含任何凭据内容」）守护。
 
+## 隐私与扫码登录
+
+扫码登录这条链路涉及的数据只有两样，都在本机：
+
+| 数据 | 位置 | 生命周期 |
+| --- | --- | --- |
+| 二维码 PNG | CLI 自己生成的临时文件（`$TMPDIR/org.chromium.Chromium.scoped_dir.*/qrcode.png`） | 登录进程退出后由系统清理 |
+| 二维码图片字节 | Host 内存 → 设置卡片 `<img src="data:...">` | 登录成功后卡片清空，不落盘、不写日志 |
+
+插件不读 CLI 的登录态文件（`~/Library/Application Support/doubao_cli/doubao-cli-pc-login/`），只调用 `doubao auth status` 拿一个布尔值。
+
 ## 测试
 
 ```sh
 node --test "tests/*.test.js"
 ```
 
-116 个用例，覆盖协议解析、网关、账号池、保活巡检、CLI 后端（NDJSON 事件、串行队列、探测、超时/取消）、目录合并与设置卡片渲染。CLI 相关用例全部用假子进程（`EventEmitter` + `Readable`）驱动，不依赖本机是否装了豆包 CLI；`tests/onboarding.test.js` 的 12 个用例覆盖首次引导的三态与隐私回归；`tests/client.test.js` 用带 hooks 槽位的假 react 真正驱动卡片重渲染（含引导区块渲染）。
+148 个用例，覆盖协议解析、网关、账号池、保活巡检、CLI 后端（NDJSON 事件、串行队列、探测、超时/取消）、扫码登录、插件路由、目录合并与设置卡片渲染。
+
+- CLI 与登录相关用例全部用假子进程（`EventEmitter` + `Readable`）驱动，不依赖本机是否装了豆包 CLI；
+- `tests/onboarding.test.js`（14 例）覆盖首次引导的三态与隐私回归；
+- `tests/login.test.js`（18 例）覆盖二维码解析、conflict/不可用/未安装三种失败、文件晚落盘重试、单实例复用、过期与取消、**伪造 PNG 不被当图片回传**；
+- `tests/routes.test.js`（11 例）覆盖方法闸、loopback 闸、能力缺席不注册、poll 读 body、卸载回收；
+- `tests/client.test.js` 用带 hooks 槽位的假 react 真正驱动卡片重渲染（含引导区块与登录区块）。
 
 纯 ESM JavaScript，零构建、零运行时依赖（仅 Node 内置模块 + 宿主 peer 包）。
 
