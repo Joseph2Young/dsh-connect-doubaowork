@@ -41,6 +41,7 @@ export function apply(ctx, config) {
   // 「设置 → 模型」页（宿主只枚举有 volatile 字段的命名空间）。失败不影响聊天。
   try {
     bindSettingsNamespace(ctx, {
+      log,
       onReady: () => log('debug', 'settings 命名空间已就绪（模型页可编辑本 provider）'),
     })
   } catch (error) {

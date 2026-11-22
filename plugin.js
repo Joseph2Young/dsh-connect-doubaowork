@@ -69,21 +69,39 @@ export function bootstrap(ctx, deps) {
  * @param {(ctx: object) => void} [options.onReady] settings 服务就绪后的回调
  * @returns {() => void} dispose（settings 缺席时为空操作）
  */
-export function bindSettingsNamespace(ctx, { onReady } = {}) {
+export function bindSettingsNamespace(ctx, { onReady, log } = {}) {
+  // 幂等守卫：settings 服务重启会让 inject 回调再跑一遍，而宿主对同一个 fiber
+  // 只允许 configure 一次（重复调用抛 "Settings presentation is already
+  // configured for this plugin instance"）。这里自己守住这个状态。
+  let configured = false
+  const configure = settings => {
+    if (settings === undefined || typeof settings.configure !== 'function') return false
+    if (configured) return true
+    try {
+      ctx.effect(() => {
+        const dispose = settings.configure({ auto: false }, ctx.fiber)
+        configured = true
+        return () => {
+          configured = false
+          dispose?.()
+        }
+      }, 'dsh-connect-doubaowork: settings presentation')
+    } catch (error) {
+      // 已配置过（极少数宿主在 effect 之外预先登记）时不算失败：命名空间照样在
+      log?.('debug', `settings.configure 跳过（${error?.message ?? error}）`)
+      configured = true
+    }
+    onReady?.(settings)
+    return true
+  }
+
   // 与 workbuddy 一致：优先响应式等待服务上线，避免启动顺序把注册吃掉
   if (typeof ctx?.inject === 'function') {
     ctx.inject(['settings'], settingsCtx => {
-      const settings = settingsCtx?.settings ?? settingsCtx?.get?.('settings')
-      if (settings === undefined || typeof settings.configure !== 'function') return
-      ctx.effect(() => settings.configure({ auto: false }, ctx.fiber), 'dsh-connect-doubaowork: settings presentation')
-      onReady?.(settings)
+      configure(settingsCtx?.settings ?? settingsCtx?.get?.('settings'))
     })
     return () => {}
   }
-  const settings = ctx?.get?.('settings')
-  if (settings !== undefined && typeof settings.configure === 'function') {
-    ctx.effect(() => settings.configure({ auto: false }, ctx.fiber), 'dsh-connect-doubaowork: settings presentation')
-    onReady?.(settings)
-  }
+  configure(ctx?.get?.('settings'))
   return () => {}
 }

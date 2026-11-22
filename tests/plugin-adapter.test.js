@@ -221,3 +221,44 @@ test('bindSettingsNamespace：settings 服务存在但缺 configure 时不注册
   assert.doesNotThrow(() => bindSettingsNamespace(fakeCtx))
   assert.deepEqual(effectLabels, [])
 })
+
+test('bindSettingsNamespace：settings 服务重启导致 inject 回调重跑时不重复 configure', () => {
+  // 宿主对同一个 fiber 只允许 configure 一次，重复调用会抛
+  // "Settings presentation is already configured for this plugin instance"。
+  let callback = null
+  const configureCalls = []
+  const disposers = []
+  const fakeCtx = {
+    fiber: {},
+    inject: (names, cb) => { callback = cb },
+    effect: fn => { disposers.push(fn()); return () => {} },
+  }
+  const settings = { configure: () => { configureCalls.push(1); return () => {} } }
+  bindSettingsNamespace(fakeCtx)
+  callback({ settings })
+  assert.equal(configureCalls.length, 1)
+  // settings 服务重启：cordis 会把同一个 inject 回调再投递一次
+  callback({ settings })
+  assert.equal(configureCalls.length, 1, '重复投递不应再次 configure')
+  // 服务下线（effect 清理触发）后再上线，应能重新 configure
+  for (const dispose of disposers) dispose()
+  callback({ settings })
+  assert.equal(configureCalls.length, 2, '服务重新上线后应重新 configure')
+})
+
+test('bindSettingsNamespace：宿主拒绝重复 configure 时降级为 debug 日志，不抛错', () => {
+  const logLines = []
+  const fakeCtx = {
+    fiber: {},
+    get: () => ({
+      configure: () => {
+        throw new Error('Settings presentation is already configured for this plugin instance')
+      },
+    }),
+    effect: fn => fn(),
+  }
+  assert.doesNotThrow(() => bindSettingsNamespace(fakeCtx, { log: (level, message) => logLines.push([level, message]) }))
+  assert.equal(logLines.length, 1)
+  assert.equal(logLines[0][0], 'debug')
+  assert.match(logLines[0][1], /already configured/)
+})
