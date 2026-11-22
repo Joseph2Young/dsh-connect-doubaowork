@@ -60,19 +60,63 @@ export const DOUBAO_QUERY = Object.freeze({
   chromium_version: '147.0.7727.149',
 })
 
+/**
+ * 可在设置页直接编辑、且改动后不需要重挂插件的字段名。
+ *
+ * 这份清单同时喂两处，避免漂移：
+ *   1. `createConfigSchema` 里对应字段会被 `.volatile()` 包裹；
+ *   2. `unwrapConfig` 按这些键把 volatile 引用对象还原成普通值。
+ *
+ * 宿主侧机制（@deepseek-ai/dsh-settings `describe()`）：只有 Config schema 里
+ * 至少有一个 volatile 字段的插件，才会出现在 settings 的命名空间列表里；
+ * 而「设置 → 模型」页只列出 settingsNs 命中该列表的 provider——所以这份清单
+ * 是豆包 provider 能否出现在模型页的唯一开关。
+ *
+ * `account` 故意不在此列：它内含 cookie，不该出现在可编辑表单里。
+ */
+export const VOLATILE_FIELDS = Object.freeze([
+  'enabledModelIds',
+  'workMode',
+  'reasoningEffort',
+  'autoDiscoverCredentials',
+  'credentialsFile',
+  'timeoutSeconds',
+  'heartbeatSeconds',
+  'flattenHistory',
+  'conversationMode',
+  'poolEnabled',
+  'keepaliveEnabled',
+  'backend',
+  'cliPath',
+  'cliWorkspace',
+  'cliPermissionMode',
+  'cliConcurrency',
+  'cliEffort',
+])
+
+/**
+ * 标记为 volatile（宿主新版才有该方法；老版 schemastery 退化为原样返回）。
+ *
+ * schemastery 3.18.3+ 的 `.volatile()` 会让 Loader 在配置变更时只更新引用而不
+ * 重挂插件，也让 settings 服务把这个插件纳入可编辑命名空间。
+ */
+function volatileField(schema) {
+  return typeof schema?.volatile === 'function' ? schema.volatile() : schema
+}
+
 export function createConfigSchema(z) {
   return z.object({
-    enabledModelIds: z.array(z.string()).default([]).description('启用的模型 ID；留空 = 全部'),
-    workMode: z.boolean().default(DOUBAO_DEFAULTS.workMode).description('启用豆包工作模式（agent_mode=1 / mode_id=3）'),
-    reasoningEffort: z.string().default(DOUBAO_DEFAULTS.reasoningEffort).description('工作模式思考强度：0-4'),
-    autoDiscoverCredentials: z.boolean().default(true).description('无凭据文件时尝试从豆包桌面端自动发现登录态（实验性）'),
-    credentialsFile: z.string().default('').description('凭据 JSON 路径；留空用 ~/.dsh-doubao/credentials.json，可用 DSH_DOUBAO_CREDENTIALS_FILE 覆盖'),
+    enabledModelIds: volatileField(z.array(z.string()).default([]).description('启用的模型 ID；留空 = 全部')),
+    workMode: volatileField(z.boolean().default(DOUBAO_DEFAULTS.workMode).description('启用豆包工作模式（agent_mode=1 / mode_id=3）')),
+    reasoningEffort: volatileField(z.string().default(DOUBAO_DEFAULTS.reasoningEffort).description('工作模式思考强度：0-4')),
+    autoDiscoverCredentials: volatileField(z.boolean().default(true).description('无凭据文件时尝试从豆包桌面端自动发现登录态（实验性）')),
+    credentialsFile: volatileField(z.string().default('').description('凭据 JSON 路径；留空用 ~/.dsh-doubao/credentials.json，可用 DSH_DOUBAO_CREDENTIALS_FILE 覆盖')),
     chatUrl: z.string().default(DOUBAO_DEFAULTS.chatUrl).description('上游工作模式端点'),
     userAgent: z.string().default(DOUBAO_DEFAULTS.userAgent).description('上游 User-Agent'),
-    timeoutSeconds: z.number().default(DOUBAO_DEFAULTS.timeoutSeconds).description('上游请求超时（秒）'),
-    heartbeatSeconds: z.number().default(DOUBAO_DEFAULTS.heartbeatSeconds).description('SSE 心跳间隔（秒）'),
-    flattenHistory: z.boolean().default(DOUBAO_DEFAULTS.flattenHistory).description('首轮把历史消息压平为一段'),
-    conversationMode: z.string().default(DOUBAO_DEFAULTS.conversationMode).description('豆包侧会话归属：single = 全部落进同一条豆包会话（默认）；per-chat = 每个 DSH 会话一条豆包记录'),
+    timeoutSeconds: volatileField(z.number().default(DOUBAO_DEFAULTS.timeoutSeconds).description('上游请求超时（秒）')),
+    heartbeatSeconds: volatileField(z.number().default(DOUBAO_DEFAULTS.heartbeatSeconds).description('SSE 心跳间隔（秒）')),
+    flattenHistory: volatileField(z.boolean().default(DOUBAO_DEFAULTS.flattenHistory).description('首轮把历史消息压平为一段')),
+    conversationMode: volatileField(z.string().default(DOUBAO_DEFAULTS.conversationMode).description('豆包侧会话归属：single = 全部落进同一条豆包会话（默认）；per-chat = 每个 DSH 会话一条豆包记录')),
     account: z.object({
       id: z.string().default('').description('账号唯一 ID；留空由插件生成'),
       label: z.string().default('').description('账号备注名'),
@@ -81,15 +125,46 @@ export function createConfigSchema(z) {
       webId: z.string().default('').description('web_id'),
       enabled: z.boolean().default(true).description('是否参与账号池调度'),
     }).description('主账号（兼容旧单账号凭据；账号池的保底成员）'),
-    poolEnabled: z.boolean().default(DOUBAO_DEFAULTS.poolEnabled).description('账号池故障转移：请求失败时自动换下一个启用账号重试'),
-    keepaliveEnabled: z.boolean().default(DOUBAO_DEFAULTS.keepaliveEnabled).description('每日保活巡检：定时检查各账号 cookie 是否仍被豆包接受并记录健康状态（读操作，默认关）'),
-    backend: z.string().default(DOUBAO_DEFAULTS.backend).description('上游后端：auto = 装好豆包 CLI 且已登录时优先 CLI，否则用 HTTP 抓包（默认）；cli = 只用 CLI；http = 只用 HTTP 抓包'),
-    cliPath: z.string().default('').description('doubao 可执行文件路径；留空自动探测 npm 全局 bin / PATH'),
-    cliWorkspace: z.string().default('').description('CLI 任务工作目录（-C）；留空用用户主目录'),
-    cliPermissionMode: z.string().default(DOUBAO_DEFAULTS.cliPermissionMode).description('CLI 权限模式：ask_always / ask_risky（默认）/ always_allow'),
-    cliConcurrency: z.number().default(DOUBAO_DEFAULTS.cliConcurrency).description('CLI 并发任务上限（CLI 是单账号共享后台，建议保持 1）'),
-    cliEffort: z.string().default('').description('CLI 推理强度：none/minimal/low/medium/high/xhigh/max；留空用模型默认'),
+    poolEnabled: volatileField(z.boolean().default(DOUBAO_DEFAULTS.poolEnabled).description('账号池故障转移：请求失败时自动换下一个启用账号重试')),
+    keepaliveEnabled: volatileField(z.boolean().default(DOUBAO_DEFAULTS.keepaliveEnabled).description('每日保活巡检：定时检查各账号 cookie 是否仍被豆包接受并记录健康状态（读操作，默认关）')),
+    backend: volatileField(z.string().default(DOUBAO_DEFAULTS.backend).description('上游后端：auto = 装好豆包 CLI 且已登录时优先 CLI，否则用 HTTP 抓包（默认）；cli = 只用 CLI；http = 只用 HTTP 抓包')),
+    cliPath: volatileField(z.string().default('').description('doubao 可执行文件路径；留空自动探测 npm 全局 bin / PATH')),
+    cliWorkspace: volatileField(z.string().default('').description('CLI 任务工作目录（-C）；留空用用户主目录')),
+    cliPermissionMode: volatileField(z.string().default(DOUBAO_DEFAULTS.cliPermissionMode).description('CLI 权限模式：ask_always / ask_risky（默认）/ always_allow')),
+    cliConcurrency: volatileField(z.number().default(DOUBAO_DEFAULTS.cliConcurrency).description('CLI 并发任务上限（CLI 是单账号共享后台，建议保持 1）')),
+    cliEffort: volatileField(z.string().default('').description('CLI 推理强度：none/minimal/low/medium/high/xhigh/max；留空用模型默认')),
   })
+}
+
+/**
+ * 解包 volatile 引用：schemastery 把 `.volatile()` 字段解析成 `{get(), write()}`
+ * 引用对象，凡是「读配置值」的地方都过一遍这里，行为与老版普通值一致。
+ *
+ * 与 workbuddy 的 unwrapVolatileDeep 同构：剥一层 get()，对象/数组逐层递归；
+ * 非引用值原样返回。
+ */
+export function unwrapVolatile(value) {
+  if (value === null || value === undefined) return value
+  if (typeof value.get === 'function') return unwrapVolatile(value.get())
+  if (Array.isArray(value)) return value.map(entry => unwrapVolatile(entry))
+  if (typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
+    const out = {}
+    for (const [key, entry] of Object.entries(value)) out[key] = unwrapVolatile(entry)
+    return out
+  }
+  return value
+}
+
+/**
+ * 配置快照读取器：每次调用返回「解包后」的普通值对象。
+ *
+ * 为什么不是一次性解包：volatile 字段在宿主里是活引用，配置一改引用就地更新
+ * （http://Volatile configuration），每次现读才能拿到最新值，也让「改了就生效」
+ * 不需要重挂插件。`raw` 保留原对象供需要身份比较的老路径使用。
+ * @param {object} rawHostConfig apply() 收到的宿主配置对象（可能含 volatile 引用）
+ */
+export function createConfigReader(rawHostConfig) {
+  return () => unwrapVolatile(rawHostConfig ?? {}) ?? {}
 }
 
 /** 思考强度收口：只允许 '0'-'4'，越界回落默认。 */
@@ -110,7 +185,8 @@ function clampNonNegativeInt(value, fallback) {
 
 /** 把宿主配置归一为内部运行参数（无 schema 环境也能安全读取）。 */
 export function normalizeConfig(config) {
-  const raw = config ?? {}
+  // 宿主可能把 volatile 字段解析成 {get()} 引用对象，先整体解包再收口
+  const raw = unwrapVolatile(config) ?? {}
   const pick = (key, fallback) => {
     const value = raw[key]
     return value === undefined || value === null || value === '' ? fallback : value

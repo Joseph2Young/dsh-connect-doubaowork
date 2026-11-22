@@ -307,6 +307,49 @@ test('client bundle：已登录时入口变成「重新扫码登录」', async (
   assert.match(flat, /重新扫码登录/)
 })
 
+// ── 0.5.0 修的第二个真实缺陷：CLI 与桌面端模型清单被合并成一份 ─────────────
+// 现场：模型选择器里同一个上游模型出现两次（静态表友好名 + CLI 的 person-* 名）。
+// 修法：宿主侧 status.models 由 catalogForBackend(effectiveBackend, …) 算出，
+// 二选一；卡片只展示这一份，不再自己拼接 CLI 清单。
+
+test('client bundle：当前生效区块展示 status.models（CLI 后端只列 CLI 清单）', async () => {
+  const flat = await renderCardWithStatus({
+    backend: 'auto',
+    effectiveBackend: 'cli',
+    models: ['deepseek-v4-flash', 'kimi-k3'],
+    defaultModel: 'deepseek-v4-flash',
+    cli: { installed: true, version: '2.37.2', loggedIn: true, models: ['9', 'person-deepseek-v4-1-flash-261017'] },
+    setup: { ready: true, pending: false, steps: [], summary: {} },
+  })
+  assert.match(flat, /当前生效（只读测量值）/)
+  assert.match(flat, /CLI（豆包 CLI 自己的登录态）/)
+  assert.match(flat, /2：deepseek-v4-flash, kimi-k3/)
+  assert.match(flat, /deepseek-v4-flash/)
+})
+
+test('client bundle：当前生效区块在 HTTP 后端时标记 HTTP 且模型清单来自静态表', async () => {
+  const flat = await renderCardWithStatus({
+    effectiveBackend: 'http',
+    models: ['auto', 'doubao-2.1-lite'],
+    defaultModel: 'doubao-2.1-lite',
+    cli: { installed: true, version: '2.37.2', loggedIn: true, models: [] },
+    setup: { ready: true, pending: false, steps: [], summary: {} },
+  })
+  assert.match(flat, /HTTP（复用桌面端 cookie）/)
+  assert.match(flat, /2：auto, doubao-2\.1-lite/)
+})
+
+test('client bundle：没有可路由模型时给出可读提示而不是空白', async () => {
+  const flat = await renderCardWithStatus({
+    effectiveBackend: 'cli',
+    models: [],
+    defaultModel: 'deepseek-v4-flash',
+    cli: { installed: true, version: '2.37.2', loggedIn: false, models: [] },
+    setup: { ready: false, pending: false, steps: [], summary: {} },
+  })
+  assert.match(flat, /暂无；CLI 需先登录才会拉取清单/)
+})
+
 test('声明 dsh.client 的包必须在 exports 暴露 ./client 且目标文件存在（宿主冷启动硬校验）', () => {
   const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   if (pkg.dsh?.client) {

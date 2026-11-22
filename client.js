@@ -60,6 +60,13 @@ window.__ModuleLoader__.load({
         'accounts.never': '从未巡检',
         'accounts.readonly': '（健康状态为只读测量值，由巡检写入 ~/.dsh-doubao/pool-state.json）',
         'group.backend': '上游后端',
+        'group.effective': '当前生效（只读测量值）',
+        'effective.backend': '实际使用的后端',
+        'effective.backend.cli': 'CLI（豆包 CLI 自己的登录态）',
+        'effective.backend.http': 'HTTP（复用桌面端 cookie）',
+        'effective.models': '当前可路由模型',
+        'effective.default': '默认模型',
+        'effective.noModels': '（暂无；CLI 需先登录才会拉取清单）',
         'field.backend': '后端选择',
         'field.backend.auto': 'auto：装好 CLI 且已登录就优先 CLI，否则用 HTTP',
         'field.backend.cli': 'cli：只用豆包 CLI（需先执行 doubao login）',
@@ -137,6 +144,13 @@ window.__ModuleLoader__.load({
         'accounts.never': 'never',
         'accounts.readonly': ' (health is a read-only measurement written to ~/.dsh-doubao/pool-state.json)',
         'group.backend': 'Upstream backend',
+        'group.effective': 'In effect now (read-only)',
+        'effective.backend': 'Backend in use',
+        'effective.backend.cli': 'CLI (the Doubao CLI keeps its own sign-in)',
+        'effective.backend.http': 'HTTP (reuses the desktop cookie)',
+        'effective.models': 'Routable models',
+        'effective.default': 'Default model',
+        'effective.noModels': '(none yet; the CLI list appears after sign-in)',
         'field.backend': 'Backend',
         'field.backend.auto': 'auto: prefer CLI when installed and signed in, else HTTP',
         'field.backend.cli': 'cli: Doubao CLI only (run doubao login first)',
@@ -494,6 +508,31 @@ window.__ModuleLoader__.load({
             ['medium', 'medium'], ['high', 'high'], ['xhigh', 'xhigh'], ['max', 'max']]
             .map(([level, label]) => h('option', { key: level === '' ? 'default' : level, value: level }, label)))),
         )
+      }
+
+      // —— 当前生效后端与模型清单（只读测量值）——
+      // 关键：这里是「二选一」结果的唯一展示位。status.models 由宿主侧按
+      // effectiveBackend 交给 catalogForBackend() 算出，因此 CLI 后端只会列出
+      // CLI 实报的模型，HTTP 后端只会列出静态表，两者不会混在一起。
+      rows.push(h('div', { key: 'ge', style: sectionTitle }, t('group.effective')))
+      if (status === null || status === undefined) {
+        rows.push(h('div', { key: 'geu', style: { opacity: 0.7, fontSize: '0.88em' } }, statusError ? t('error.fetch') : t('cli.unknown')))
+      } else {
+        const effective = status.effectiveBackend === 'cli' ? 'cli' : 'http'
+        rows.push(h('div', { key: 'ge1', style: rowStyle },
+          h('span', null, t('effective.backend')),
+          h('span', { style: { fontSize: '0.85em', opacity: 0.85 } }, t(`effective.backend.${effective}`)),
+        ))
+        const liveModels = Array.isArray(status.models) ? status.models : []
+        rows.push(h('div', { key: 'ge2', style: rowStyle },
+          h('span', null, t('effective.models')),
+          h('span', { style: { fontSize: '0.85em', opacity: 0.85, maxWidth: '62%', textAlign: 'right' } },
+            liveModels.length === 0 ? t('effective.noModels') : `${liveModels.length}：${liveModels.join(', ')}`),
+        ))
+        rows.push(h('div', { key: 'ge3', style: rowStyle },
+          h('span', null, t('effective.default')),
+          h('span', { style: { fontSize: '0.85em', opacity: 0.85 } }, String(status.defaultModel ?? '')),
+        ))
       }
 
       // —— CLI 探测状态（只读测量值 + 手动重新探测）——

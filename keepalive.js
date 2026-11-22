@@ -83,9 +83,12 @@ export function writePoolState(state, statePath = POOL_STATE_PATH) {
  * @param {string} [input.userAgent] 巡检 UA（默认与请求 UA 一致）
  * @param {boolean} [input.enabled] 每日巡检开关（opt-in，默认关）
  */
-export function createKeepalive({ accounts, log = () => {}, statePath = POOL_STATE_PATH, fetchImpl = fetch, userAgent = '', enabled = false } = {}) {
+export function createKeepalive({ accounts, log = () => {}, statePath = POOL_STATE_PATH, fetchImpl = fetch, userAgent = '', enabled = false, enabledOf = null } = {}) {
   let timer = null
   let running = false
+
+  /** 当前是否启用：优先读活配置（volatile 开关立刻生效），否则用构造期快照。 */
+  const isEnabled = () => (typeof enabledOf === 'function' ? enabledOf() === true : enabled === true)
 
   /** 立即巡检一轮；已在巡检中时直接返回当前状态（幂等，不并发）。 */
   async function runNow(reason = 'manual') {
@@ -116,7 +119,7 @@ export function createKeepalive({ accounts, log = () => {}, statePath = POOL_STA
       clearTimeout(timer)
       timer = null
     }
-    if (enabled !== true) return
+    if (isEnabled() !== true) return
     timer = setTimeout(() => {
       timer = null
       void runNow('scheduled').finally(schedule)

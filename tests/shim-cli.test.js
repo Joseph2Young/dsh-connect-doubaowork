@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createDoubaoShim } from '../shim.js'
 import { buildRequestBody, pumpSse } from '../doubao-protocol.js'
-import { deriveCatalog, resolveModel, mergeCliModels, DOUBAO_DEFAULT_MODEL } from '../catalog.js'
+import { catalogFromCli, deriveCatalog, resolveModel, DOUBAO_DEFAULT_MODEL } from '../catalog.js'
 import { DOUBAO_DEFAULTS, DOUBAO_QUERY } from '../config.js'
 
 /**
@@ -296,7 +296,7 @@ test('backend=auto：CLI 不可用时回落 HTTP（无凭据 → 503 提示两�
 })
 
 test('CLI 后端：模型不在静态表里也能路由（CLI 独有模型）', async () => {
-  const base = mergeCliModels([{ id: 'brand-new-model', name: '新模型' }])
+  const base = catalogFromCli([{ id: 'brand-new-model', name: '新模型' }])
   const cli = makeFakeCli({ script: [{ kind: 'delta', text: '新模型回答' }, { kind: 'ok' }] })
   const shim = makeShim({ cli, catalogModels: base })
   await shim.start()

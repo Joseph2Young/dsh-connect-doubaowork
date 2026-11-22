@@ -6,8 +6,8 @@
  * dsh-connect-workbuddy 的 attach 范式一致）。
  */
 import z from '@deepseek-ai/schemastery'
-import { createConfigSchema, normalizeConfig, DOUBAO_DEFAULTS, DOUBAO_QUERY, DOUBAO_SETTINGS_NS } from './config.js'
-import { DOUBAO_PROVIDER, DOUBAO_PROVIDER_DISPLAY_NAME, DOUBAO_DEFAULT_MODEL, deriveCatalog, resolveModel, mergeCliModels } from './catalog.js'
+import { createConfigSchema, createConfigReader, normalizeConfig, DOUBAO_DEFAULTS, DOUBAO_QUERY, DOUBAO_SETTINGS_NS } from './config.js'
+import { DOUBAO_PROVIDER, DOUBAO_PROVIDER_DISPLAY_NAME, catalogForBackend, defaultModelForBackend, resolveModel } from './catalog.js'
 import { loadAccountList } from './credentials.js'
 import { buildRequestBody, pumpSse } from './doubao-protocol.js'
 import { createDoubaoShim } from './shim.js'
@@ -17,14 +17,19 @@ import { createCliClient, fetchCliModels, probeCli } from './cli-backend.js'
 import { inspectSetup, formatSetupGuide } from './onboarding.js'
 import { registerPluginRoutes } from './routes.js'
 import { createLoginManager } from './login.js'
-import { bootstrap } from './plugin.js'
+import { bootstrap, bindSettingsNamespace } from './plugin.js'
 
 export const name = 'dsh-connect-doubaowork'
+// 只硬依赖 llm：settings 走 apply 里的响应式 ctx.inject（老宿主没有 settings
+// 服务时插件仍能聊天，只是模型页不列本 provider）。
 export const inject = ['llm']
 export const Config = createConfigSchema(z)
 
 export function apply(ctx, config) {
   const settingsNs = settingsNamespaceOf(ctx)
+  // 活配置读取器：volatile 字段改动是就地更新引用（不重挂插件），
+  // 所以任何「用户能改」的配置都必须现读，不能用 apply 期快照。
+  const readConfig = createConfigReader(config)
   const normalized = normalizeConfig(config)
   const log = (level, message, error) => {
     const fn = ctx.logger?.[level]
@@ -32,37 +37,74 @@ export function apply(ctx, config) {
     else console[level === 'error' ? 'error' : 'log'](`[dsh-connect-doubaowork] ${message}`, error ?? '')
   }
 
-  // 目录每次现读活配置；normalizeConfig 是 apply 期快照，volatile 变更随重挂生效
-  const enabledIds = () => (Array.isArray(config?.enabledModelIds) ? config.enabledModelIds.map(String) : normalized.enabledModelIds)
+  // 把本插件的 Config 挂进宿主 settings 服务：这一步决定 provider 能否出现在
+  // 「设置 → 模型」页（宿主只枚举有 volatile 字段的命名空间）。失败不影响聊天。
+  try {
+    bindSettingsNamespace(ctx, {
+      onReady: () => log('debug', 'settings 命名空间已就绪（模型页可编辑本 provider）'),
+    })
+  } catch (error) {
+    log('warn', `settings 命名空间注册失败（模型页可能不显示本 provider）：${error?.message ?? error}`)
+  }
+
+  // 每次现读：volatile 变更立刻生效（后端/模型勾选/CLI 路径等）
+  const pick = key => {
+    const live = readConfig()
+    return live[key] === undefined ? normalized[key] : live[key]
+  }
+  const backendOf = () => {
+    const value = String(pick('backend') ?? 'auto')
+    return value === 'cli' || value === 'http' ? value : 'auto'
+  }
+  /** 当前实际生效的后端（auto 在 CLI 可用时走 cli），模型目录据此二选一。 */
+  const effectiveBackend = () => {
+    const wanted = backendOf()
+    if (wanted === 'http') return 'http'
+    if (wanted === 'cli') return 'cli'
+    return cliState.available ? 'cli' : 'http'
+  }
+  const enabledIds = () => {
+    const value = pick('enabledModelIds')
+    return Array.isArray(value) ? value.map(String) : []
+  }
   // CLI 动态清单：登录后拉一次并缓存；拉取失败/未登录时回落静态表（catalog.js）
   let cliModels = []
-  const models = () => deriveCatalog(enabledIds(), mergeCliModels(cliModels))
+  // 二选一：走 CLI 只列 CLI 实报清单，走 HTTP 只列静态表，绝不并集
+  const models = () => catalogForBackend(effectiveBackend(), cliModels, enabledIds())
+  const defaultModel = () => defaultModelForBackend(effectiveBackend(), cliModels)
   // 账号池装配：插件配置主账号 → 凭据文件（数组或旧单账号）→ 自动发现
   const accounts = () => loadAccountList({
-    account: config?.account ?? normalized.account,
-    credentialsFile: typeof config?.credentialsFile === 'string' ? config.credentialsFile : normalized.credentialsFile,
-    autoDiscover: config?.autoDiscoverCredentials !== false,
+    account: pick('account'),
+    credentialsFile: pick('credentialsFile'),
+    autoDiscover: pick('autoDiscoverCredentials') !== false,
   })
 
   // CLI 状态快照：probeCli 是异步的，shim 侧需要同步判断，故用可变快照
-  const cliPath = () => (typeof config?.cliPath === 'string' ? config.cliPath.trim() : normalized.cliPath)
+  const cliPath = () => {
+    const value = pick('cliPath')
+    return typeof value === 'string' ? value.trim() : ''
+  }
   // CLI 探测状态：安装态/登录态/版本，供设置卡片与启动日志展示
   // installed 与 available 分开：未登录时 installed 仍为 true，供卡片如实展示；
   // available 还要求（已登录 或 用户显式选了 backend='cli'）
   const cliState = { available: false, installed: false, version: '', loggedIn: false, message: '尚未探测' }
   const cliClient = createCliClient({
-    cliPath: cliPath(),
-    workspace: typeof config?.cliWorkspace === 'string' ? config.cliWorkspace.trim() : normalized.cliWorkspace,
-    permissionMode: normalized.cliPermissionMode,
-    timeoutSeconds: normalized.timeoutSeconds,
-    concurrency: normalized.cliConcurrency,
+    // 全部传函数：volatile 改了路径/工作区/权限/并发立刻生效，不必重挂插件
+    cliPath,
+    workspace: () => {
+      const value = pick('cliWorkspace')
+      return typeof value === 'string' ? value.trim() : ''
+    },
+    permissionMode: () => String(pick('cliPermissionMode') ?? 'ask_risky'),
+    timeoutSeconds: () => Number(pick('timeoutSeconds') ?? 300),
+    concurrency: () => Number(pick('cliConcurrency') ?? 1),
     log,
   })
   const refreshCli = async () => {
     const found = await probeCli({ cliPath: cliPath() })
     // backend=cli 时不看登录态也让 shim 走 CLI：错误信息由 CLI 自己透传，
     // 好过静默回落 HTTP 让用户以为在用 CLI
-    const forced = (normalized.backend === 'cli')
+    const forced = backendOf() === 'cli'
     cliState.installed = found.installed
     cliState.available = found.installed && (found.loggedIn || forced)
     cliState.version = found.version
@@ -82,10 +124,10 @@ export function apply(ctx, config) {
 
   // 首次使用引导：检查本机有没有可用接入方式（CLI 或 Cookie），没有就给出安装/配置步骤
   const inspect = () => inspectSetup({
-    credentialsFile: typeof config?.credentialsFile === 'string' ? config.credentialsFile : normalized.credentialsFile,
-    autoDiscover: config?.autoDiscoverCredentials !== false,
+    credentialsFile: pick('credentialsFile'),
+    autoDiscover: pick('autoDiscoverCredentials') !== false,
     cliPath: cliPath(),
-    account: config?.account ?? normalized.account,
+    account: pick('account'),
   })
   // 引导快照：初始为「尚未检查」，refreshSetup() 后填真值；失败也留一条可读结果
   let setupState = { ready: false, backend: '', steps: [], summary: {}, pending: true }
@@ -125,18 +167,20 @@ export function apply(ctx, config) {
     defaults: {
       ...DOUBAO_DEFAULTS,
       query: DOUBAO_QUERY,
-      defaultModel: DOUBAO_DEFAULT_MODEL,
-      reasoningEffort: normalized.reasoningEffort,
-      chatUrl: normalized.chatUrl,
-      userAgent: normalized.userAgent,
-      timeoutSeconds: normalized.timeoutSeconds,
-      heartbeatSeconds: normalized.heartbeatSeconds,
-      flattenHistory: normalized.flattenHistory,
-      workMode: normalized.workMode,
-      conversationMode: normalized.conversationMode,
-      poolEnabled: normalized.poolEnabled,
-      backend: normalized.backend,
-      conversationMode: normalized.conversationMode,
+      // 以下全部用 getter：shim 侧每次读 defaults.X 都拿活配置，
+      // 用户在设置卡片/模型页改完立刻生效（volatile 不重挂插件）。
+      get defaultModel() { return defaultModel() },
+      get reasoningEffort() { return String(pick('reasoningEffort') ?? normalized.reasoningEffort) },
+      get chatUrl() { return String(pick('chatUrl') ?? normalized.chatUrl) },
+      get userAgent() { return String(pick('userAgent') ?? normalized.userAgent) },
+      get timeoutSeconds() { return Number(pick('timeoutSeconds') ?? normalized.timeoutSeconds) },
+      get heartbeatSeconds() { return Number(pick('heartbeatSeconds') ?? normalized.heartbeatSeconds) },
+      get flattenHistory() { return pick('flattenHistory') !== false },
+      get workMode() { return pick('workMode') !== false },
+      get conversationMode() { return String(pick('conversationMode') ?? normalized.conversationMode) },
+      get poolEnabled() { return pick('poolEnabled') === true },
+      get backend() { return backendOf() },
+      get cliEffort() { return String(pick('cliEffort') ?? '') },
     },
     log,
     // CLI 后端：available() 是同步快照，run() 才真正拉子进程
@@ -150,8 +194,9 @@ export function apply(ctx, config) {
   const keepalive = createKeepalive({
     accounts,
     log,
-    userAgent: normalized.userAgent,
-    enabled: normalized.keepaliveEnabled,
+    userAgent: String(pick('userAgent') ?? normalized.userAgent),
+    enabled: false,
+    enabledOf: () => pick('keepaliveEnabled') === true,
   })
   ctx.effect(() => () => {
     keepalive.stop()
@@ -167,10 +212,14 @@ export function apply(ctx, config) {
         enabled: account.enabled !== false,
         health: keepalive.readState().results?.[account.id] ?? null,
       })),
-      poolEnabled: normalized.poolEnabled,
-      keepaliveEnabled: normalized.keepaliveEnabled,
+      poolEnabled: pick('poolEnabled') === true,
+      keepaliveEnabled: pick('keepaliveEnabled') === true,
       lastRun: keepalive.readState().lastRun ?? null,
-      backend: normalized.backend,
+      backend: backendOf(),
+      // 实际生效的接入方式与「当前后端的模型清单」——设置卡片据此说明现在列的是哪一套
+      effectiveBackend: effectiveBackend(),
+      models: models().map(model => model.id),
+      defaultModel: defaultModel(),
       cli: { ...cliState, models: cliModels.map(model => model.id) },
       // 首次使用引导快照（不含任何凭据内容）
       setup: setupState,
@@ -233,9 +282,7 @@ export function apply(ctx, config) {
         adapter,
         models,
       })
-      const backend = normalized.backend === 'http'
-        ? 'http'
-        : cliState.available ? 'cli' : 'http'
+      const backend = effectiveBackend()
       log('info', `豆包工作模式网关已就绪：${shim.baseUrl()}（后端：${backend}；模型：${models().map(m => m.id).join(', ')}）`)
       // CLI 探测放到注册之后：探测要拉两次子进程（--version/auth status），
       // 不该阻塞 provider 上线；探测完成后目录会自然热更新（getModels 是 live 的）

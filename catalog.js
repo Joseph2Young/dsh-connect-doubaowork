@@ -1,19 +1,33 @@
 /**
- * 豆包工作模式静态模型目录。
+ * 豆包工作模式模型目录。
  *
- * 条目对照豆包桌面端工作模式 2026-11 实测清单（与 yyydsz/doubao2api 的
- * config.example.json model_params / model_aliases 表一致）。GLM 两个模型
- * 上游目前报错，仍保留条目以便上游恢复后立即可用。
+ * 两套上游共用一份「友好 id → 上游 id」映射表，避免同一个模型在模型选择器里
+ * 出现两次：
+ *
+ *   - HTTP 后端（抓包 www.doubao.com/chat/completion）用 `modelItemKey` 定位模型；
+ *   - CLI 后端（doubao -p --model）用 `cliId` 定位模型。
+ *
+ * 两个上游 id 在绝大多数模型上相同，因此「同一模型」天然按 modelItemKey/cliId
+ * 对上；只有一边有的模型才单独出现（HTTP 清单 = 静态表；CLI 清单 = CLI 实报）。
+ * 具体二选一逻辑见 catalogForBackend()。
  */
 
 export const DOUBAO_PROVIDER = 'doubao'
 export const DOUBAO_PROVIDER_DISPLAY_NAME = '豆包工作模式'
+/** 两套后端都存在、语义一致的首选默认模型（CLI 的 is_default 也指向它）。 */
 export const DOUBAO_DEFAULT_MODEL = 'deepseek-v4-flash'
 
 /** 上游协议不接收 max_tokens，此值仅用于宿主展示与请求夹取。 */
 const OUTPUT_TOKENS_256K = 32768
 const OUTPUT_TOKENS_300K = 65536
 
+/**
+ * 静态目录（HTTP 后端权威清单）。
+ *
+ * 条目对照豆包桌面端工作模式 2026-11 实测清单（与 yyydsz/doubao2api 的
+ * config.example.json model_params / model_aliases 表一致）。GLM 两个模型
+ * 上游目前报错，仍保留条目以便上游恢复后立即可用。
+ */
 export const DOUBAO_MODELS = [
   { id: 'auto', name: '自动', modelItemKey: '9', ratio: '免费', contextWindow: 256000, maxTokens: OUTPUT_TOKENS_256K },
   { id: 'doubao-2.1-lite', name: '豆包 2.1 Lite', modelItemKey: 'seed-lite-7b', ratio: '限时 0.01x', contextWindow: 256000, maxTokens: OUTPUT_TOKENS_256K },
@@ -34,23 +48,42 @@ export const DOUBAO_MODEL_ALIASES = Object.freeze({
 })
 
 /**
- * 按 id / 别名 / 上游 model_item_key 解析目录条目；解析失败返回 undefined。
- * @param {string} idOrKey
- * @param {Array<object>} [base] 基础目录（默认静态表；CLI 清单合并后的目录由调用方传入）
+ * 条目在两个后端上的上游 id。
+ *
+ * `cliId` 未显式声明时回落到 `modelItemKey`——两套上游对同一模型的命名一致
+ * （CLI `model list` 报的正是抓包时的 model_item_key），这也正是「同一模型
+ * 不会出现两次」的依据。
+ */
+export function upstreamId(entry, backend = 'http') {
+  if (entry === undefined || entry === null) return ''
+  const cli = String(entry.cliId ?? '').trim()
+  const http = String(entry.modelItemKey ?? '').trim()
+  if (backend === 'cli') return cli !== '' ? cli : http !== '' ? http : String(entry.id ?? '')
+  return http !== '' ? http : cli !== '' ? cli : String(entry.id ?? '')
+}
+
+/**
+ * 按 id / 别名 / 上游 id 解析目录条目；解析失败返回 undefined。
+ * @param {string} idOrKey 友好 id、别名，或任一侧上游 id
+ * @param {Array<object>} [base] 基础目录（默认静态表；二选一目录由调用方传入）
  */
 export function resolveModel(idOrKey, base = DOUBAO_MODELS) {
   const id = String(idOrKey ?? '').trim()
   if (id === '') return undefined
   const source = Array.isArray(base) && base.length > 0 ? base : DOUBAO_MODELS
   const wanted = DOUBAO_MODEL_ALIASES[id] ?? id
-  return source.find(model => model.id === wanted || model.modelItemKey === wanted)
+  return source.find(model => (
+    model.id === wanted
+    || model.modelItemKey === wanted
+    || model.cliId === wanted
+  ))
 }
 
 /**
  * 计算运行时目录：enabledIds 为空 = 全部启用；否则按集合过滤（别名先归一）。
  * 过滤结果为空时回落全部目录，避免出现不可用的空路由。
  * @param {string[]} [enabledIds]
- * @param {Array<object>} [base] 基础目录（默认静态表；CLI 清单合并后由调用方传入）
+ * @param {Array<object>} [base] 基础目录（默认静态表）
  * @returns {Array<{id:string,name:string,modelItemKey:string,ratio:string,contextWindow:number,maxTokens:number}>}
  */
 export function deriveCatalog(enabledIds, base = DOUBAO_MODELS) {
@@ -59,7 +92,7 @@ export function deriveCatalog(enabledIds, base = DOUBAO_MODELS) {
   if (raw.length === 0) return [...source]
   const wanted = new Set()
   for (const entry of raw) {
-    const resolved = resolveModel(entry)
+    const resolved = resolveModel(entry, source)
     wanted.add(resolved === undefined ? String(entry) : resolved.id)
   }
   const picked = source.filter(model => wanted.has(model.id))
@@ -67,49 +100,84 @@ export function deriveCatalog(enabledIds, base = DOUBAO_MODELS) {
 }
 
 /**
- * 把 CLI 动态清单（model list --json 产物）合并进静态目录。
+ * 把 CLI 实报清单映射成目录条目，复用静态表的友好 id 与元信息。
  *
- * 合并规则：
- *   - CLI 有的 id：用 CLI 的 displayName 覆盖，保留静态表的 contextWindow/ratio
- *     （CLI 不报这两项，静态表是唯一来源）；
- *   - CLI 有、静态表没有：新增条目（contextWindow/maxTokens 给保守默认值，
- *     modelItemKey 留空 —— HTTP 后端无法路由，仅 CLI 后端可用）；
- *   - 静态表有、CLI 没有：保留静态条目（HTTP 后端仍可用；CLI 解析失败时也不会掉模型）。
+ * 匹配顺序：`modelItemKey`（= CLI 的 model id，两套上游同源）→ 都没命中才作为
+ * CLI 独有条目追加（id 用 CLI 原始 id，HTTP 后端无法路由）。
  *
- * @param {Array<{id:string,name:string,isDefault?:boolean}>} cliModels
- * @returns {Array<object>} 合并后的目录（顺序：先静态表原序，再新增项）
+ * @param {Array<{id:string,name:string,isDefault?:boolean,efforts?:string[]}>} cliModels
+ * @returns {Array<object>}
  */
-export function mergeCliModels(cliModels) {
+export function catalogFromCli(cliModels) {
   const list = Array.isArray(cliModels) ? cliModels : []
-  if (list.length === 0) return [...DOUBAO_MODELS]
-  const byId = new Map(list.map(model => [String(model?.id ?? '').trim(), model]).filter(([id]) => id !== ''))
   const merged = []
-  for (const base of DOUBAO_MODELS) {
-    const hit = byId.get(base.id)
-    if (hit === undefined) {
-      merged.push(base)
+  const claimed = new Set()
+  for (const reported of list) {
+    const upstream = String(reported?.id ?? '').trim()
+    if (upstream === '') continue
+    const base = DOUBAO_MODELS.find(model => (model.cliId ?? model.modelItemKey) === upstream)
+    const name = String(reported?.name ?? '').trim()
+    const efforts = Array.isArray(reported?.efforts) && reported.efforts.length > 0 ? { efforts: reported.efforts.map(String) } : {}
+    if (base === undefined) {
+      merged.push({
+        id: upstream,
+        cliId: upstream,
+        name: name !== '' ? name : upstream,
+        modelItemKey: '',
+        ratio: '',
+        contextWindow: 256000,
+        maxTokens: OUTPUT_TOKENS_256K,
+        cliOnly: true,
+        ...efforts,
+      })
       continue
     }
-    byId.delete(base.id)
+    claimed.add(base.id)
     merged.push({
       ...base,
-      name: String(hit.name ?? '').trim() || base.name,
-      ...(Array.isArray(hit.efforts) && hit.efforts.length > 0 ? { efforts: hit.efforts.map(String) } : {}),
+      cliId: upstream,
+      name: name !== '' ? name : base.name,
+      ...efforts,
     })
   }
-  for (const [id, hit] of byId) {
-    // CLI 独有模型：HTTP 后端没有 model_item_key，只能走 CLI
-    merged.push({
-      id,
-      name: String(hit.name ?? '').trim() || id,
-      modelItemKey: '',
-      ratio: '',
-      contextWindow: 256000,
-      maxTokens: OUTPUT_TOKENS_256K,
-      cliOnly: true,
-      ...(Array.isArray(hit.efforts) && hit.efforts.length > 0 ? { efforts: hit.efforts.map(String) } : {}),
-    })
-  }
+  // CLI 未报但静态表里有的模型：CLI 后端无法路由，从 CLI 清单里剔除
+  // （这正是「激活哪个后端就只显示哪个模型清单」的落点）。
   return merged
 }
 
+/**
+ * 按「当前生效后端」产出目录——二选一，绝不合并且集。
+ *
+ * - `backend === 'cli'`：只用 CLI 实报清单（cliModels 为空时回落静态表，
+ *   保证 CLI 探测还没跑完/失败时选择器不至于空白）；
+ * - 其余（`http` / `auto`）：只用静态表（HTTP 抓包权威清单）。
+ *
+ * @param {'cli'|'http'|'auto'} backend
+ * @param {Array<object>} [cliModels] CLI `model list --json` 产物
+ * @param {string[]} [enabledIds] 用户勾选的模型（空 = 全部）
+ * @returns {Array<object>}
+ */
+export function catalogForBackend(backend, cliModels, enabledIds = []) {
+  const cliList = Array.isArray(cliModels) ? cliModels : []
+  const useCli = backend === 'cli' && cliList.length > 0
+  const base = useCli ? catalogFromCli(cliList) : [...DOUBAO_MODELS]
+  return deriveCatalog(enabledIds, base)
+}
+
+/**
+ * 后端默认模型：CLI 优先用 CLI 自己标了 is_default 的那个（映射回友好 id），
+ * 映射不到或没标就回落 DOUBAO_DEFAULT_MODEL（两个后端都存在）。
+ *
+ * @param {'cli'|'http'|'auto'} backend
+ * @param {Array<{id:string,isDefault?:boolean}>} [cliModels]
+ * @returns {string}
+ */
+export function defaultModelForBackend(backend, cliModels) {
+  if (backend !== 'cli') return DOUBAO_DEFAULT_MODEL
+  const list = Array.isArray(cliModels) ? cliModels : []
+  const preferred = list.find(model => model?.isDefault === true)
+  const key = String(preferred?.id ?? '').trim()
+  if (key === '') return DOUBAO_DEFAULT_MODEL
+  const entry = DOUBAO_MODELS.find(model => (model.cliId ?? model.modelItemKey) === key)
+  return entry === undefined ? DOUBAO_DEFAULT_MODEL : entry.id
+}

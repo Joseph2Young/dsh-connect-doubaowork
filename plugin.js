@@ -4,7 +4,7 @@
  */
 
 /**
- * @param {object} ctx cordis 上下文（需有 ctx.llm 与 ctx.effect）
+ * @param {object} ctx cordis 上下文（需有 ctx.llm、ctx.effect、可选 ctx.get）
  * @param {object} deps { providerId, displayName, settingsNs, adapter, models() }
  * @returns {() => void} dispose
  */
@@ -50,4 +50,40 @@ export function bootstrap(ctx, deps) {
   })
 
   return dispose
+}
+
+/**
+ * 把插件自己的 Config 挂进宿主 settings 服务。
+ *
+ * 为什么必须有这一步：宿主「设置 → 模型」页列 provider 的条件是
+ * `state.namespaces.has(entry.settingsNs)`，而 namespaces 来自 settings 服务的
+ * `describe()`，它只收录「Config 里至少有一个 `.volatile()` 字段」的条目
+ * （`volatileForm(schema) === undefined → 跳过`）。没有 volatile 字段的插件，
+ * provider 照样能聊天，但永远不会出现在模型页——这正是豆包之前的状态。
+ *
+ * `auto: false` 表示不额外生成一份由宿主渲染的配置页（我们自己有设置卡片），
+ * 只借用命名空间，让模型页能列出 provider 行并打开编辑。
+ *
+ * @param {object} ctx cordis 上下文
+ * @param {object} options
+ * @param {(ctx: object) => void} [options.onReady] settings 服务就绪后的回调
+ * @returns {() => void} dispose（settings 缺席时为空操作）
+ */
+export function bindSettingsNamespace(ctx, { onReady } = {}) {
+  // 与 workbuddy 一致：优先响应式等待服务上线，避免启动顺序把注册吃掉
+  if (typeof ctx?.inject === 'function') {
+    ctx.inject(['settings'], settingsCtx => {
+      const settings = settingsCtx?.settings ?? settingsCtx?.get?.('settings')
+      if (settings === undefined || typeof settings.configure !== 'function') return
+      ctx.effect(() => settings.configure({ auto: false }, ctx.fiber), 'dsh-connect-doubaowork: settings presentation')
+      onReady?.(settings)
+    })
+    return () => {}
+  }
+  const settings = ctx?.get?.('settings')
+  if (settings !== undefined && typeof settings.configure === 'function') {
+    ctx.effect(() => settings.configure({ auto: false }, ctx.fiber), 'dsh-connect-doubaowork: settings presentation')
+    onReady?.(settings)
+  }
+  return () => {}
 }

@@ -1,17 +1,22 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createConfigSchema, normalizeConfig, clampEffort, DOUBAO_DEFAULTS, DOUBAO_QUERY } from '../config.js'
+import { createConfigSchema, createConfigReader, normalizeConfig, unwrapVolatile, clampEffort, DOUBAO_DEFAULTS, DOUBAO_QUERY, VOLATILE_FIELDS } from '../config.js'
 
-/** 最小假 z：只记录字段种类与链式 default/description。 */
+/** 最小假 z：只记录字段种类与链式 default/description/volatile。 */
 function makeFakeZ() {
   const field = kind => {
-    const f = { kind, defaultValue: undefined, descriptionText: '' }
+    const f = { kind, defaultValue: undefined, descriptionText: '', volatileFlag: false }
     f.default = v => {
       f.defaultValue = v
       return f
     }
     f.description = d => {
       f.descriptionText = d
+      return f
+    }
+    // 与真实 schemastery 一致：volatile 是链式副作用，返回自身
+    f.volatile = () => {
+      f.volatileFlag = true
       return f
     }
     return f
@@ -129,4 +134,61 @@ test('上游 query 常量完整', () => {
   assert.equal(DOUBAO_QUERY.version_code, '20800')
   assert.equal(DOUBAO_QUERY.device_platform, 'web')
   assert.equal(Object.keys(DOUBAO_QUERY).length, 19)
+})
+
+test('VOLATILE_FIELDS：用户可改的字段都是 volatile（模型页列 provider 的唯一开关）', () => {
+  const z = makeFakeZ()
+  createConfigSchema(z)
+  const fields = z.fields
+  // 清单里的每个字段都必须真的调用了 .volatile()
+  for (const key of VOLATILE_FIELDS) {
+    assert.equal(fields[key]?.volatileFlag, true, `${key} 应该是 volatile`)
+  }
+  // 敏感字段（含 cookie）不进可编辑表单，因此不是 volatile
+  // （account 是嵌套 object schema，不是单字段，故用 notEqual 判）
+  assert.notEqual(fields.account.volatileFlag, true)
+  assert.equal(fields.chatUrl.volatileFlag, false)
+  assert.equal(fields.userAgent.volatileFlag, false)
+  // 清单与 schema 字段名严格对应，避免拼错后静默失效
+  for (const key of VOLATILE_FIELDS) assert.ok(Object.hasOwn(fields, key), `未知字段 ${key}`)
+  assert.equal(VOLATILE_FIELDS.length, new Set(VOLATILE_FIELDS).size)
+})
+
+test('unwrapVolatile：剥掉 get() 包装，数组与嵌套对象逐层还原', () => {
+  const wrap = value => ({ get: () => value })
+  assert.equal(unwrapVolatile('cli'), 'cli')
+  assert.equal(unwrapVolatile(wrap('cli')), 'cli')
+  assert.deepEqual(unwrapVolatile(wrap(['a', 'b'])), ['a', 'b'])
+  assert.deepEqual(unwrapVolatile(wrap(['a', wrap('b')])), ['a', 'b'])
+  // 嵌套对象里的 volatile 字段
+  assert.deepEqual(unwrapVolatile({ backend: wrap('http'), n: 3 }), { backend: 'http', n: 3 })
+  // 深层：整个 Config 被 volatile 包裹时的形态
+  assert.deepEqual(unwrapVolatile(wrap({ backend: wrap('cli') })), { backend: 'cli' })
+  // null / undefined 不炸
+  assert.equal(unwrapVolatile(undefined), undefined)
+  assert.equal(unwrapVolatile(null), null)
+})
+
+test('createConfigReader：活配置改动立即可见（volatile 就地更新语义）', () => {
+  let current = { backend: 'auto', cliPath: '' }
+  // 模拟 Cosmokit createVolatile：get() 返回当前值
+  const hostConfig = { get: () => current }
+  const read = createConfigReader(hostConfig)
+  assert.equal(read().backend, 'auto')
+  // 宿主就地更新引用后，读取器看到新值（不重挂插件也能生效）
+  current = { backend: 'cli', cliPath: '/opt/doubao' }
+  assert.equal(read().backend, 'cli')
+  assert.equal(read().cliPath, '/opt/doubao')
+  // 空配置返回空对象而不是 undefined，调用方可以安全取值
+  assert.deepEqual(createConfigReader(undefined)(), {})
+})
+
+test('normalizeConfig 能吃 volatile 包装过的配置', () => {
+  // 宿主可能把整个 Config 作为 volatile 引用传进来
+  const wrapped = { get: () => ({ backend: 'cli', cliEffort: 'high', conversationMode: 'per-chat', poolEnabled: true }) }
+  const config = normalizeConfig(wrapped)
+  assert.equal(config.backend, 'cli')
+  assert.equal(config.cliEffort, 'high')
+  assert.equal(config.conversationMode, 'per-chat')
+  assert.equal(config.poolEnabled, true)
 })

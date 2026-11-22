@@ -188,18 +188,37 @@ export function createTaskQueue(concurrency = 1) {
  */
 export function createCliClient(options = {}) {
   const {
-    cliPath = '',
-    workspace = '',
-    permissionMode = 'ask_risky',
     extraArgs = [],
-    timeoutSeconds = 300,
-    concurrency = 1,
     spawnImpl = spawn,
     log = () => {},
   } = options
 
-  const queue = createTaskQueue(concurrency)
-  const cwd = workspace !== '' && path.isAbsolute(workspace) ? workspace : os.homedir()
+  // 以下选项支持「函数形态」：插件里传入 ()=>config.cliPath 之类的读取器，
+  // 这样 volatile 配置改了立刻生效，不必重挂插件（队列/超时/权限都是现读）。
+  const live = (value, fallback) => {
+    const resolved = typeof value === 'function' ? value() : value
+    return resolved === undefined || resolved === null ? fallback : resolved
+  }
+  const cliPathOf = () => String(live(options.cliPath, '') ?? '').trim()
+  const workspaceOf = () => String(live(options.workspace, '') ?? '').trim()
+  const permissionModeOf = () => String(live(options.permissionMode, 'ask_risky') ?? '')
+  const timeoutSecondsOf = () => {
+    const n = Number(live(options.timeoutSeconds, 300))
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 300
+  }
+  const concurrencyOf = () => {
+    const n = Number(live(options.concurrency, 1))
+    return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1
+  }
+
+  /** 队列在并发上限变化时重建：阈值只在取任务时读取，不影响已在跑的任务。 */
+  let queue = createTaskQueue(concurrencyOf())
+  let queueLimit = concurrencyOf()
+
+  const cwdOf = () => {
+    const workspace = workspaceOf()
+    return workspace !== '' && path.isAbsolute(workspace) ? workspace : os.homedir()
+  }
 
   /**
    * 跑一次 CLI 任务，事件通过回调流出。
@@ -207,6 +226,11 @@ export function createCliClient(options = {}) {
    * @returns {Promise<{ok:boolean, sessionId:string, text:string, errors:string[], denials:object[]}>}
    */
   function run(task) {
+    const limit = concurrencyOf()
+    if (limit !== queueLimit) {
+      queue = createTaskQueue(limit)
+      queueLimit = limit
+    }
     return queue.run(() => execute(task))
   }
 
@@ -216,6 +240,10 @@ export function createCliClient(options = {}) {
     if (task.signal?.aborted === true) {
       return Promise.resolve({ ok: false, sessionId: '', text: '', errors: ['调用方已断开'], denials: [] })
     }
+    const cliPath = cliPathOf()
+    const cwd = cwdOf()
+    const permissionMode = permissionModeOf()
+    const timeoutSeconds = timeoutSecondsOf()
     const args = []
     if (cwd !== '') args.push('-C', cwd)
     const isResume = typeof task.sessionId === 'string' && task.sessionId !== ''
@@ -355,7 +383,7 @@ export function createCliClient(options = {}) {
     })
   }
 
-  return { run, cwd: () => cwd, queueSize: () => queue.size() }
+  return { run, cwd: cwdOf, queueSize: () => queue.size() }
 }
 
 /**
