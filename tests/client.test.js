@@ -436,3 +436,33 @@ test('client bundle：configForms 晚于卡片就绪时，晚到后仍渲染出�
     globalThis.fetch = originalFetch
   }
 })
+
+test('client bundle：留痕区块展示会话复用模式与落盘状态', async () => {
+  const flat = await renderCardWithStatus({
+    conversationMode: 'single',
+    conversations: { count: 1, persisted: true, file: '/Users/x/.dsh-doubao/conversations.json' },
+    effectiveBackend: 'cli',
+    models: ['deepseek-v4-flash'],
+    defaultModel: 'deepseek-v4-flash',
+    cli: { installed: true, version: '2.37.2', loggedIn: true, models: ['deepseek-v4-flash'] },
+  })
+  assert.match(flat, /豆包侧的留痕/)
+  assert.match(flat, /固定复用同一条豆包会话/)
+  assert.match(flat, /1 条（进程重启后仍复用，不会新开）/)
+  assert.match(flat, /已落盘/)
+  // 关键告知：豆包侧历史删不掉，只能力求少留
+  assert.match(flat, /没有删除会话的命令/)
+})
+
+test('client bundle：未落盘时提示重载会新开一条豆包会话', async () => {
+  const flat = await renderCardWithStatus({
+    conversationMode: 'per-chat',
+    conversations: { count: 3, persisted: false, file: '' },
+    effectiveBackend: 'http',
+    models: ['auto'],
+    defaultModel: 'auto',
+    cli: { installed: false, version: '', loggedIn: false, models: [] },
+  })
+  assert.match(flat, /每个对话各一条豆包会话/)
+  assert.match(flat, /仅内存（重载插件会丢，豆包侧会新开一条）/)
+})

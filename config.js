@@ -26,6 +26,8 @@ export const DOUBAO_DEFAULTS = Object.freeze({
   cliConcurrency: 1,
   // CLI 推理强度：空 = 不传 --effort，用模型默认（与 HTTP 侧 reasoningEffort 的 0-4 语义不同，故单列）
   cliEffort: '',
+  // 会话绑定落盘文件：空 = 默认 ~/.dsh-doubao/conversations.json（仅会话 id，不含内容）
+  conversationsFile: '',
   workMode: true,
   botId: '7338286299411103781',
   modeId: '3',
@@ -92,6 +94,7 @@ export const VOLATILE_FIELDS = Object.freeze([
   'cliPermissionMode',
   'cliConcurrency',
   'cliEffort',
+  'conversationsFile',
 ])
 
 /**
@@ -133,6 +136,7 @@ export function createConfigSchema(z) {
     cliPermissionMode: volatileField(z.string().default(DOUBAO_DEFAULTS.cliPermissionMode).description('CLI 权限模式：ask_always / ask_risky（默认）/ always_allow')),
     cliConcurrency: volatileField(z.number().default(DOUBAO_DEFAULTS.cliConcurrency).description('CLI 并发任务上限（CLI 是单账号共享后台，建议保持 1）')),
     cliEffort: volatileField(z.string().default('').description('CLI 推理强度：none/minimal/low/medium/high/xhigh/max；留空用模型默认')),
+    conversationsFile: volatileField(z.string().default('').description('会话绑定落盘文件；留空用 ~/.dsh-doubao/conversations.json（只存会话 id，不含对话内容）')),
   })
 }
 
@@ -216,6 +220,7 @@ export function normalizeConfig(config) {
     cliPermissionMode: normalizePermissionMode(raw.cliPermissionMode),
     cliConcurrency: clampPositiveInt(pick('cliConcurrency', DOUBAO_DEFAULTS.cliConcurrency), DOUBAO_DEFAULTS.cliConcurrency),
     cliEffort: normalizeCliEffort(raw.cliEffort),
+    conversationsFile: typeof raw.conversationsFile === 'string' ? raw.conversationsFile.trim() : '',
   }
 }
 

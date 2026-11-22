@@ -17,6 +17,7 @@ import { createCliClient, fetchCliModels, probeCli } from './cli-backend.js'
 import { inspectSetup, formatSetupGuide } from './onboarding.js'
 import { registerPluginRoutes } from './routes.js'
 import { createLoginManager } from './login.js'
+import { resolveConversationsPath } from './conversation-store.js'
 import { bootstrap, bindSettingsNamespace } from './plugin.js'
 
 export const name = 'dsh-connect-doubaowork'
@@ -79,6 +80,10 @@ export function apply(ctx, config) {
     credentialsFile: pick('credentialsFile'),
     autoDiscover: pick('autoDiscoverCredentials') !== false,
   })
+
+  // 会话绑定落盘路径：DSH_DOUBAO_CONVERSATIONS_FILE 可覆盖（多实例/测试隔离），
+  // 默认 ~/.dsh-doubao/conversations.json，与 pool-state.json 同目录。
+  const conversationsFile = () => resolveConversationsPath(typeof pick('conversationsFile') === 'string' ? pick('conversationsFile') : '')
 
   // CLI 状态快照：probeCli 是异步的，shim 侧需要同步判断，故用可变快照
   const cliPath = () => {
@@ -165,6 +170,9 @@ export function apply(ctx, config) {
     accounts,
     buildBody: buildRequestBody,
     pump: pumpSse,
+    // 会话绑定落盘：豆包侧历史无法删除，唯一能减少留痕的手段是「跨进程复用同一条
+    // 豆包会话」。空串（或读写失败）自动退化为纯内存，不影响聊天。
+    conversationsFile: conversationsFile(),
     defaults: {
       ...DOUBAO_DEFAULTS,
       query: DOUBAO_QUERY,
@@ -224,6 +232,9 @@ export function apply(ctx, config) {
       settingsNs,
       models: models().map(model => model.id),
       defaultModel: defaultModel(),
+      // 豆包侧留痕：复用同一条会话的绑定条数与落盘状态（只报条数，不报会话 id）
+      conversations: shim.conversations(),
+      conversationMode: String(pick('conversationMode') ?? normalized.conversationMode),
       cli: { ...cliState, models: cliModels.map(model => model.id) },
       // 首次使用引导快照（不含任何凭据内容）
       setup: setupState,

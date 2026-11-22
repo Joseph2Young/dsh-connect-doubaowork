@@ -67,6 +67,16 @@ window.__ModuleLoader__.load({
         'effective.models': '当前可路由模型',
         'effective.default': '默认模型',
         'effective.noModels': '（暂无；CLI 需先登录才会拉取清单）',
+        'group.trace': '豆包侧的留痕',
+        'trace.mode': '会话复用模式',
+        'trace.mode.single': '固定复用同一条豆包会话（推荐，留痕最少）',
+        'trace.mode.perChat': '每个对话各一条豆包会话（留痕随对话数增长）',
+        'trace.bound': '已记住的会话绑定',
+        'trace.bound.value': '%s 条（进程重启后仍复用，不会新开）',
+        'trace.persisted': '绑定落盘',
+        'trace.persisted.yes': '已落盘：%s',
+        'trace.persisted.no': '仅内存（重载插件会丢，豆包侧会新开一条）',
+        'trace.hint': '豆包 CLI 没有删除会话的命令，历史属于豆包服务端；插件能做的只有反复复用同一条会话，把新增条数压到最少。旧记录请在豆包客户端手动删除。',
         'field.backend': '后端选择',
         'field.backend.auto': 'auto：装好 CLI 且已登录就优先 CLI，否则用 HTTP',
         'field.backend.cli': 'cli：只用豆包 CLI（需先执行 doubao login）',
@@ -151,6 +161,16 @@ window.__ModuleLoader__.load({
         'effective.models': 'Routable models',
         'effective.default': 'Default model',
         'effective.noModels': '(none yet; the CLI list appears after sign-in)',
+        'group.trace': 'Traces on the Doubao side',
+        'trace.mode': 'Conversation reuse',
+        'trace.mode.single': 'Reuse one Doubao conversation (recommended, fewest traces)',
+        'trace.mode.perChat': 'One Doubao conversation per chat (traces grow with chats)',
+        'trace.bound': 'Bound conversations',
+        'trace.bound.value': '%s kept (survives restarts, so no new ones)',
+        'trace.persisted': 'Binding storage',
+        'trace.persisted.yes': 'Saved to %s',
+        'trace.persisted.no': 'Memory only (reloading the plugin starts a new Doubao conversation)',
+        'trace.hint': 'The Doubao CLI has no command to delete conversations; the history lives on the Doubao server. The plugin can only reuse one conversation to keep new entries to a minimum. Delete old records in the Doubao client.',
         'field.backend': 'Backend',
         'field.backend.auto': 'auto: prefer CLI when installed and signed in, else HTTP',
         'field.backend.cli': 'cli: Doubao CLI only (run doubao login first)',
@@ -540,6 +560,33 @@ window.__ModuleLoader__.load({
           h('span', null, t('effective.default')),
           h('span', { style: { fontSize: '0.85em', opacity: 0.85 } }, String(status.defaultModel ?? '')),
         ))
+      }
+
+      // —— 豆包侧留痕（只读测量值）——
+      // 豆包 CLI 没有删会话的命令，历史是服务端产物；能减少留痕的只有「复用同一条
+      // 会话」+「绑定落盘跨重启存活」。这里把这两个事实摊开给用户看，避免误以为
+      // 插件在偷偷上传/留存对话。
+      rows.push(h('div', { key: 'gt', style: sectionTitle }, t('group.trace')))
+      if (status === null || status === undefined) {
+        rows.push(h('div', { key: 'gtu', style: { opacity: 0.7, fontSize: '0.88em' } }, statusError ? t('error.fetch') : t('cli.unknown')))
+      } else {
+        const mode = String(status.conversationMode ?? 'single') === 'per-chat' ? 'perChat' : 'single'
+        rows.push(h('div', { key: 'gt1', style: rowStyle },
+          h('span', null, t('trace.mode')),
+          h('span', { style: { fontSize: '0.85em', opacity: 0.85 } }, t(`trace.mode.${mode}`)),
+        ))
+        const bound = Number(status.conversations?.count ?? 0)
+        rows.push(h('div', { key: 'gt2', style: rowStyle },
+          h('span', null, t('trace.bound')),
+          h('span', { style: { fontSize: '0.85em', opacity: 0.85 } }, t('trace.bound.value').replace('%s', String(bound))),
+        ))
+        const persisted = status.conversations?.persisted === true
+        rows.push(h('div', { key: 'gt3', style: rowStyle },
+          h('span', null, t('trace.persisted')),
+          h('span', { style: { fontSize: '0.85em', opacity: 0.85, maxWidth: '62%', textAlign: 'right' } },
+            persisted ? t('trace.persisted.yes').replace('%s', String(status.conversations?.file ?? '')) : t('trace.persisted.no')),
+        ))
+        rows.push(h('div', { key: 'gt4', style: { opacity: 0.75, fontSize: '0.82em', marginTop: '0.35em' } }, t('trace.hint')))
       }
 
       // —— CLI 探测状态（只读测量值 + 手动重新探测）——

@@ -17,12 +17,12 @@ import http from 'node:http'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { extractText, shortHash } from './doubao-protocol.js'
 import { upstreamId } from './catalog.js'
+import { createConversationStore } from './conversation-store.js'
 
 const CHAT_PATH = '/v1/chat/completions'
 const MODELS_PATH = '/v1/models'
 const HEALTH_PATH = '/healthz'
 const MAX_BODY_BYTES = 32 * 1024 * 1024
-const MAX_CONVERSATIONS = 512
 /** single 会话模式下的固定键：所有请求复用同一条豆包会话。 */
 const SINGLE_CONVERSATION_KEY = 'dsh-single'
 
@@ -54,6 +54,24 @@ function lastUserText(messages) {
   return ''
 }
 
+/**
+ * 判断 CLI 的错误是否是「绑定的会话在服务端不存在」。
+ *
+ * 实测（doubao 2.37.2）：`--resume <不存在的 id>` 返回
+ * `{"type":"result","subtype":"error_during_execution","is_error":true,
+ *   "errors":["数据不存在（错误码 712017001）"]}` 且退出码非 0。
+ * 文案可能随版本微调，所以同时认错误码与关键中文短语。
+ *
+ * @param {string[]} [errors]
+ * @param {string} [stray] 非 JSON 行（例如 login_required）里的最后一条
+ * @returns {boolean}
+ */
+function isStaleSession(errors = [], stray = '') {
+  const text = [...(Array.isArray(errors) ? errors : []), stray].filter(item => typeof item === 'string').join('\n')
+  if (text === '') return false
+  return text.includes('712017001') || text.includes('数据不存在')
+}
+
 
 /**
  * @param {object} options
@@ -79,13 +97,19 @@ export function createDoubaoShim(options) {
     defaults,
     log = () => {},
     cli = null,
+    conversationsFile = '',
   } = options
 
   const token = randomToken()
   let server = null
   let port = 0
   let closed = false
-  let conversations = new Map()
+  // 会话绑定表：默认纯内存；index.js 传入 conversationsFile 后落盘，
+  // 使插件重挂 / 宿主重启后仍复用同一条豆包会话（豆包侧历史条数才不会膨胀）
+  let conversations = createConversationStore({
+    file: typeof conversationsFile === 'string' ? conversationsFile : '',
+    log,
+  })
   // CLI 后端不转发宿主 tools 的提示只打一次，避免每轮刷屏
   let warnedCliTools = false
   // 账号池粘性轮换锚点：上次成功请求的账号 id（'', 初始未定）
@@ -108,7 +132,8 @@ export function createDoubaoShim(options) {
 
   async function close() {
     closed = true
-    conversations = new Map()
+    // 注意：不能清空绑定表——持久化的意义就是跨进程复用同一条豆包会话。
+    // 这里只保证待落盘内容已经写出（set/delete 本身就即时 flush，留此兜底）。
     if (server === null) return
     const closing = server
     server = null
@@ -199,13 +224,14 @@ export function createDoubaoShim(options) {
     return shortHash(`${payload?.model ?? ''}\u0000${firstUser}`)
   }
 
-  function rememberConversation(convKey, conversationId, accountId) {
+  function rememberConversation(convKey, conversationId, accountId, backend) {
     if (conversationId === '') return
-    conversations.set(convKey, { conversationId, accountId })
-    while (conversations.size > MAX_CONVERSATIONS) {
-      const oldest = conversations.keys().next().value
-      conversations.delete(oldest)
-    }
+    conversations.set(convKey, { conversationId, accountId, backend })
+  }
+
+  /** 会话在豆包侧已不存在（服务端返回「数据不存在」）：清掉绑定，下次重建。 */
+  function forgetConversation(convKey) {
+    return conversations.delete(convKey)
   }
 
   /**
@@ -327,34 +353,50 @@ export function createDoubaoShim(options) {
       }, defaults.heartbeatSeconds * 1000)
       : null
 
+    // 模型：CLI 只认自己的上游 id（`doubao model list` 报的 person-*），
+    // 目录里的 id 是我们给用户看的友好名（deepseek-v4-flash），不能直传。
+    // auto 交给 CLI 自己挑默认模型。
+    const cliModel = entry.id === 'auto' ? '' : upstreamId(entry, 'cli')
+    const runCli = sessionId => cli.run({
+      prompt,
+      model: cliModel,
+      effort: defaults.cliEffort ?? '',
+      sessionId,
+      signal: controller.signal,
+      onInit(nextSessionId) {
+        rememberConversation(convKey, nextSessionId, 'cli', 'cli')
+      },
+      onDelta(text) {
+        wrote = true
+        finalText += text
+        if (isStream) writeDelta({ content: text })
+      },
+      onTool(tools) {
+        for (const tool of tools) log('info', `CLI 工具调用：${tool.name}${tool.status === '' ? '' : ` (${tool.status})`}`)
+      },
+      onStray(text) {
+        lastError = text
+      },
+    })
+
     let outcome
     try {
-      outcome = await cli.run({
-        prompt,
-        // 模型：CLI 只认自己的上游 id（`doubao model list` 报的 person-*），
-        // 目录里的 id 是我们给用户看的友好名（deepseek-v4-flash），不能直传。
-        // auto 交给 CLI 自己挑默认模型。
-        model: entry.id === 'auto' ? '' : upstreamId(entry, 'cli'),
-        effort: defaults.cliEffort ?? '',
-        sessionId: boundSession,
-        signal: controller.signal,
-        onInit(sessionId) {
-          rememberConversation(convKey, sessionId, 'cli')
-        },
-        onDelta(text) {
-          wrote = true
-          finalText += text
-          if (isStream) writeDelta({ content: text })
-        },
-        onTool(tools) {
-          for (const tool of tools) log('info', `CLI 工具调用：${tool.name}${tool.status === '' ? '' : ` (${tool.status})`}`)
-        },
-        onStray(text) {
-          lastError = text
-        },
-      })
+      outcome = await runCli(boundSession)
     } catch (error) {
       outcome = { ok: false, errors: [String(error?.message ?? error)], sessionId: boundSession, text: '' }
+    }
+
+    // 绑定的豆包会话在服务端已不存在（用户手动清理 / 账号切换 / 服务端回收）：
+    // 清掉绑定后用「无 resume」重跑一次，否则每轮都会撞 712017001 直接失败。
+    if (outcome.ok !== true && boundSession !== '' && !wrote && isStaleSession(outcome.errors, lastError)) {
+      log('info', `豆包会话 ${boundSession} 已失效（数据不存在），清除绑定后重建一次`)
+      forgetConversation(convKey)
+      lastError = ''
+      try {
+        outcome = await runCli('')
+      } catch (error) {
+        outcome = { ok: false, errors: [String(error?.message ?? error)], sessionId: '', text: '' }
+      }
     }
 
     finished = true
@@ -627,7 +669,12 @@ export function createDoubaoShim(options) {
     if (pumpError !== undefined) log('warn', `pump_error: ${pumpError?.message ?? pumpError}`)
   }
 
-  return { start, ready, close, baseUrl, token: tokenOf, port: () => port }
+  /** 会话复用快照（卡片「豆包侧留痕」区块用）：只报条数与落盘路径，不报会话 id。 */
+  function conversationsInfo() {
+    return { count: conversations.size(), persisted: conversations.file !== '', file: conversations.file }
+  }
+
+  return { start, ready, close, baseUrl, token: tokenOf, port: () => port, conversations: conversationsInfo }
 }
 
 function fail(res, status, message) {

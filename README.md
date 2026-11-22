@@ -213,10 +213,13 @@ HTTP 后端需要豆包登录态；如果只用 CLI 后端（`backend: "cli"`）
 | `cliPermissionMode` | `"ask_risky"` | CLI 权限模式：`ask_always` / `ask_risky` / `always_allow` |
 | `cliConcurrency` | `1` | CLI 并发任务上限（CLI 是单账号共享后台，建议保持 1） |
 | `cliEffort` | `""` | CLI 推理强度：`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`，空 = 模型默认 |
+| `conversationsFile` | `""` | 会话绑定落盘路径，空 = `~/.dsh-doubao/conversations.json`（只存会话 id，不含对话内容） |
 
 ## 设置界面
 
 插件自带 DSH Web GUI 设置卡片（`dsh.client` 注入，无需构建）：在 **DSH 设置 → 插件 → 豆包工作模式** 中可读写网关选项（会话归属、工作模式、思考强度、超时等）、查看账号池健康状态、手动触发保活巡检。卡片另有一块「上游后端 / 豆包 CLI」区域：可切换 `backend`、填写 `cliPath` 与工作目录、选择 CLI 权限模式与推理强度，并显示 CLI 的安装/登录状态与拉到的模型清单，提供「重新探测 CLI」按钮（`POST /plugins/dsh-connect-doubaowork/cli/refresh`）。
+
+卡片里还有一块只读的「当前生效（只读测量值）」与「豆包侧的留痕」：前者显示实际走的后端、当前可路由的模型清单与默认模型（模型清单按后端二选一，CLI 只列 CLI 实报、HTTP 只列静态表）；后者显示会话复用模式、已记住的会话绑定条数与是否落盘，让你一眼看出「豆包侧会不会又新开一条」。
 
 卡片顶部还有「首次使用引导」区块（见上文），显示三步状态灯与修复命令，并提供「重新检查接入方式」按钮（`POST /plugins/dsh-connect-doubaowork/setup`）。
 
@@ -258,10 +261,29 @@ HTTP 后端需要豆包登录态；如果只用 CLI 后端（`backend: "cli"`）
 
 插件默认 `conversationMode: "single"`：所有 DSH 请求复用同一条豆包会话，客户端里只出现一条记录。会话锚定用的是「首条 user 消息」而非首条消息本身——pi-ai 对不支持会话中 system 的模型会在第二轮起移除首条 system，若按首条消息哈希会键漂移、每个 agent 轮次新建一条豆包窗口。
 
-可以进一步调整：
+### 会话绑定会落盘（0.6.0 起）
 
-- 设 `conversationMode: "per-chat"`：每个 DSH 会话对应一条豆包记录（按会话隔离历史）；
+复用同一条豆包会话依赖「记住上次那条会话的 id」。这个绑定以前只存在内存里，插件重挂或宿主重启就丢——下一次请求立刻在豆包侧新开一条，历史因此越积越多。0.6.0 起绑定落盘到：
+
+```
+~/.dsh-doubao/conversations.json
+```
+
+- **只存会话标识**：文件形如 `{"version":1,"entries":{"dsh-single":{"conversationId":"38455723343216898","accountId":"cli","updatedAt":...}}}`，**不含任何对话内容、不含 Cookie**；
+- **可删**：删掉它只会让下一次请求新建一条豆包会话，不影响登录态与配置；
+- **读写失败不阻塞**：目录不可写、文件损坏、格式版本不符都按空表继续，最坏退化为原先的纯内存行为；
+- **路径可改**：配置项 `conversationsFile`，或环境变量 `DSH_DOUBAO_CONVERSATIONS_FILE`。
+
+### 失效会话会自动重建
+
+豆包侧会话可能被清理（用户在客户端删除、服务端回收、切换账号）。CLI 对此的报错是 `数据不存在（错误码 712017001）`。插件检测到该错误时会**清除绑定并用「无 resume」重跑一次**，避免后续每一轮都直接失败；日志里会留一行 `豆包会话 <id> 已失效（数据不存在），清除绑定后重建一次`。
+
+### 还能进一步减少留痕吗
+
+- 设 `conversationMode: "per-chat"`：每个 DSH 会话对应一条豆包记录（按会话隔离历史，但条数会随对话数增长）；
 - 在豆包桌面端登录一个次要账号（或在 `credentials.json` 里填次要账号的 Cookie），主账号的客户端保持干净。
+
+**能力边界（如实说明）**：豆包 CLI 没有删除会话的子命令（`--help` 全部选项里没有 delete/archive），也没有「临时会话 / 不落库」模式（`message_storage_type` 在 CLI 里恒为 `0` 硬编码）。插件能做到的上限就是「反复复用同一条会话，把新增条数压到 1 条甚至 0 条」，已产生的历史只能在豆包客户端里手动删除。
 
 ## 豆包反问如何回到 DSH
 
@@ -294,6 +316,7 @@ HTTP 后端需要豆包登录态；如果只用 CLI 后端（`backend: "cli"`）
 
 - **模型选择器里同一个模型出现两次（CLI 的 `person-*` 和友好名各一条）？** 0.4.x 把静态表与 CLI 清单合并成一份（23 项，其中 10 项语义重复）。0.5.0 起改为按当前生效后端**二选一**：CLI 后端只列 CLI 实报的模型（能对上静态表的复用友好 ID），HTTP 后端只列静态表。切换 `backend` 保存后立即生效，无需重启。
 
+- **豆包客户端里还是有一堆「在的」「收到了」的历史记录？** 那是豆包服务端的历史记录，不是插件上传的内容；CLI 没有删除会话的命令，插件也无法关闭服务端留痕。插件能做到的是「反复复用同一条会话」——`conversationMode` 默认 `single`，加上会话绑定落盘（`~/.dsh-doubao/conversations.json`），DSH 重启后仍接同一条，所以新增条数会稳定在 0～1 条。已经产生的历史只能在豆包客户端里手动删除。
 - **模型页里豆包那一行的编辑卡片只有一行灰色提示、Apply 按钮禁用？** 宿主 `ProviderEditor` 只对 `llm-deepseek` / `llm-pi-ai` 这两个命名空间渲染完整表单，其它命名空间一律显示 `advancedHint` 并禁用提交。这是宿主的设计边界，不是插件缺陷；豆包的配置入口是本插件的设置卡片。
 
 ## 隐私与数据流向
@@ -314,6 +337,7 @@ HTTP 后端需要豆包登录态；如果只用 CLI 后端（`backend: "cli"`）
 本插件会写的文件（都在用户目录，不进仓库）：
 
 - `~/.dsh-doubao/pool-state.json`——账号探测结果（只有 HTTP 状态码、时间戳、账号 id，**不含 Cookie**）
+- `~/.dsh-doubao/conversations.json`——会话绑定（只有豆包会话 id、账号 id、时间戳，**不含对话内容、不含 Cookie**；权限 `0600`）
 
 日志脱敏约定：插件在任何日志、错误信息、引导输出里**都不打印 Cookie、token、device_id 的实际取值**；引导只报告「有无 / 能否解析 / 账号数」这类形状信息，并有专门的回归用例（`tests/onboarding.test.js` 的「summary 不含任何凭据内容」）守护。
 
@@ -334,7 +358,7 @@ HTTP 后端需要豆包登录态；如果只用 CLI 后端（`backend: "cli"`）
 node --test "tests/*.test.js"
 ```
 
-173 个用例，覆盖协议解析、网关、账号池、保活巡检、CLI 后端（NDJSON 事件、串行队列、探测、超时/取消）、扫码登录、插件路由、模型目录二选一与设置卡片渲染。
+188 个用例，覆盖协议解析、网关、账号池、保活巡检、CLI 后端（NDJSON 事件、串行队列、探测、超时/取消）、扫码登录、插件路由、模型目录二选一、会话绑定持久化（含跨进程复用与失效重建）与设置卡片渲染。
 
 - CLI 与登录相关用例全部用假子进程（`EventEmitter` + `Readable`）驱动，不依赖本机是否装了豆包 CLI；
 - `tests/onboarding.test.js`（14 例）覆盖首次引导的三态与隐私回归；
@@ -342,7 +366,8 @@ node --test "tests/*.test.js"
 - `tests/routes.test.js`（17 例）覆盖方法闸、loopback 闸、能力缺席不注册、poll 读 body、卸载回收，以及**启动顺序回归**（webServer 晚于插件就绪、插件先卸载而挂载晚到）；
 - `tests/client.test.js` 用带 hooks 槽位的假 react 真正驱动卡片重渲染（含引导区块、登录区块与「当前生效」区块）；
 - `tests/plugin-adapter.test.js`（11 例）含 `bindSettingsNamespace()` 的六条路径（响应式 inject / 老宿主同步探测 / settings 缺席 / 缺 configure / 服务重启重投递幂等 / 宿主拒绝重复 configure 时降级）+ 监听 `loader/volatile-update` 刷新目录；
-- `tests/config.test.js`（10 例）守护 `VOLATILE_FIELDS`：17 个字段必须真的调用 `.volatile()`，`account`/`chatUrl`/`userAgent` 必须不是 volatile。
+- `tests/config.test.js`（10 例）守护 `VOLATILE_FIELDS`：17 个字段必须真的调用 `.volatile()`，`account`/`chatUrl`/`userAgent` 必须不是 volatile；
+- `tests/conversation-store.test.js`（11 例）覆盖会话绑定落盘：跨实例复用、文件损坏/版本不符降级、删除即落盘、超限淘汰、写入失败不影响聊天，以及**文件不含对话内容 + 权限 0600** 的隐私回归。
 
 纯 ESM JavaScript，零构建、零运行时依赖（仅 Node 内置模块 + 宿主 peer 包）。
 

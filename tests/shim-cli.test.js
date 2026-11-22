@@ -4,6 +4,9 @@ import { createDoubaoShim } from '../shim.js'
 import { buildRequestBody, pumpSse } from '../doubao-protocol.js'
 import { catalogFromCli, deriveCatalog, resolveModel, DOUBAO_DEFAULT_MODEL } from '../catalog.js'
 import { DOUBAO_DEFAULTS, DOUBAO_QUERY } from '../config.js'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 
 /**
  * 假 CLI 后端：可编排每次 run 的行为，并记录收到的任务。
@@ -372,4 +375,109 @@ test('CLI 后端：宿主 tools 只记一次提示，不重复刷日志', async 
   } finally {
     await shim.close()
   }
+})
+
+test('CLI 会话绑定落盘：新 shim 实例（模拟宿主重启）继续复用同一条豆包会话', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'doubao-shim-conv-'))
+  const file = path.join(dir, 'conversations.json')
+  const base = deriveCatalog([])
+
+  const makeShimWithFile = cli => createDoubaoShim({
+    catalog: () => base,
+    resolveModel: (id, list) => resolveModel(id, list ?? base),
+    accounts: () => [],
+    buildBody: buildRequestBody,
+    pump: pumpSse,
+    log: () => {},
+    cli,
+    conversationsFile: file,
+    defaults: {
+      ...DOUBAO_DEFAULTS, query: DOUBAO_QUERY, defaultModel: DOUBAO_DEFAULT_MODEL,
+      chatUrl: 'http://127.0.0.1:1/never', timeoutSeconds: 5, heartbeatSeconds: 0,
+      backend: 'cli', conversationMode: 'single',
+    },
+  })
+
+  const firstCli = makeFakeCli({ script: [{ kind: 'init', sessionId: '38454545920753666' }, { kind: 'delta', text: '收到' }, { kind: 'ok' }] })
+  const first = makeShimWithFile(firstCli)
+  await first.start()
+  try {
+    const response = await chat(first, { model: DOUBAO_DEFAULT_MODEL, messages: [{ role: 'user', content: '第一轮' }], stream: false })
+    assert.equal(response.status, 200)
+    await response.text()
+    // 首轮没有绑定，必须不传 sessionId
+    assert.equal(firstCli.calls[0].sessionId, '')
+  } finally {
+    await first.close()
+  }
+
+  // 模拟宿主重启：全新 shim，同一个落盘文件
+  const secondCli = makeFakeCli({ script: [{ kind: 'delta', text: '继续' }, { kind: 'ok' }] })
+  const second = makeShimWithFile(secondCli)
+  await second.start()
+  try {
+    const response = await chat(second, { model: DOUBAO_DEFAULT_MODEL, messages: [{ role: 'user', content: '第二轮' }], stream: false })
+    assert.equal(response.status, 200)
+    await response.text()
+    assert.equal(secondCli.calls[0].sessionId, '38454545920753666', '第二轮必须 --resume 首轮那条会话，否则豆包侧会新建一条记录')
+  } finally {
+    await second.close()
+  }
+})
+
+test('CLI 会话失效（712017001 数据不存在）：清掉绑定并无 resume 重建一次', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'doubao-shim-stale-'))
+  const file = path.join(dir, 'conversations.json')
+  fs.writeFileSync(file, JSON.stringify({
+    version: 1,
+    entries: { 'dsh-single': { conversationId: '99999999999999999', accountId: 'cli', backend: 'cli', updatedAt: 1 } },
+  }))
+  const base = deriveCatalog([])
+  const logs = []
+  // 第一次调用（带 resume）失败，第二次（无 resume）成功
+  const cli = {
+    calls: [],
+    available: () => true,
+    async run(task) {
+      this.calls.push(task)
+      if (this.calls.length === 1) {
+        assert.equal(task.sessionId, '99999999999999999')
+        return { ok: false, sessionId: '', text: '', errors: ['数据不存在（错误码 712017001）', '豆包 CLI 退出码 1'], denials: [] }
+      }
+      assert.equal(task.sessionId, '', '重建时必须不带 --resume')
+      task.onInit?.('new-session-42')
+      task.onDelta?.('重建成功')
+      return { ok: true, sessionId: 'new-session-42', text: '重建成功', errors: [], denials: [] }
+    },
+  }
+  const shim = createDoubaoShim({
+    catalog: () => base,
+    resolveModel: (id, list) => resolveModel(id, list ?? base),
+    accounts: () => [],
+    buildBody: buildRequestBody,
+    pump: pumpSse,
+    log: (level, message) => logs.push(`${level}:${message}`),
+    cli,
+    conversationsFile: file,
+    defaults: {
+      ...DOUBAO_DEFAULTS, query: DOUBAO_QUERY, defaultModel: DOUBAO_DEFAULT_MODEL,
+      chatUrl: 'http://127.0.0.1:1/never', timeoutSeconds: 5, heartbeatSeconds: 0,
+      backend: 'cli', conversationMode: 'single',
+    },
+  })
+  await shim.start()
+  try {
+    const response = await chat(shim, { model: DOUBAO_DEFAULT_MODEL, messages: [{ role: 'user', content: '你好' }], stream: false })
+    assert.equal(response.status, 200)
+    const body = await response.json()
+    assert.equal(body.choices[0].message.content, '重建成功')
+    assert.equal(cli.calls.length, 2)
+    assert.ok(logs.some(line => line.includes('已失效')), '应记录失效重建日志')
+  } finally {
+    await shim.close()
+  }
+
+  // 新绑定已落盘
+  const stored = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(stored.entries['dsh-single'].conversationId, 'new-session-42')
 })
