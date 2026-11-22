@@ -662,10 +662,30 @@ window.__ModuleLoader__.load({
           liveDisposers = registerSlots()
         }
 
-        const forms = ctx.get('configForms')
-        if (forms !== undefined && typeof forms.whileServed === 'function') {
-          // unserved→served 边沿绑定：settingsScope 就绪后重建插槽（渲染器按
-          // entry 身份缓存 inject 结果，晚绑定必须先卸载旧注册）
+        /**
+         * 绑定 Host 的配置表单服务。
+         *
+         * 两个坑都在这里踩过：
+         *  1. 只 `ctx.get('configForms')` 探一次。Host 的 configForms 是客户端
+         *     插件注册的服务，卡片 apply 时它未必已就绪——拿到 undefined 就再也
+         *     不重试，于是「网关选项」「上游后端」两块只剩标题、没有任何输入框
+         *     （settingsScope 恒为 undefined，走的是只读降级分支）。
+         *  2. 即便拿到服务，命名空间也要等 Host 真正开始 serve 才可读；渲染器按
+         *     entry 对象身份缓存 inject 结果，所以晚绑定时必须**先卸载旧注册再
+         *     重新注册**，否则页面停在首帧的只读形态。
+         *
+         * 因此：先用 `ctx.inject(['configForms'], …)` 等这个服务本身出现，再用
+         * `whileServed` 跟随命名空间的 served 边沿；两者都就绪前保持只读降级，
+         * 让卡片至少能显示状态与按钮。
+         */
+        const bindForms = (forms) => {
+          if (forms === undefined || typeof forms.whileServed !== 'function') {
+            // 老宿主（0.1.5 线）只有 settingsScope，没有 configForms
+            const legacy = forms?.get?.(NS_CANDIDATES[0]) ?? ctx.get?.('settingsScope')
+            if (legacy !== undefined) settingsScope = legacy
+            rebind()
+            return
+          }
           ctx.effect(() => forms.whileServed(NS_CANDIDATES, served => {
             const ns = NS_CANDIDATES.find(candidate => served.has(candidate)) ?? [...served].find(entry => /doubaowork/i.test(entry))
             settingsScope = ns === undefined ? undefined : forms.get(ns)
@@ -676,8 +696,19 @@ window.__ModuleLoader__.load({
             }
           }), 'dsh-connect-doubaowork: settings namespace binding')
           rebind()
+        }
+
+        const inlineForms = ctx.get?.('configForms')
+        if (inlineForms !== undefined) {
+          bindForms(inlineForms)
         } else {
+          // 服务尚未出现：先按只读形态渲染（卡片至少可用），等它就绪后重建插槽
           rebind()
+          if (typeof ctx.inject === 'function') {
+            ctx.inject(['configForms'], formsCtx => {
+              bindForms(formsCtx?.configForms ?? formsCtx?.get?.('configForms'))
+            })
+          }
         }
       } catch (error) {
         console.error('[dsh-connect-doubaowork] client card failed to load (host provider unaffected):', error)

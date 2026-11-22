@@ -317,3 +317,79 @@ test('声明 dsh.client 的包必须在 exports 暴露 ./client 且目标文件�
     assert.ok(CLIENT_SOURCE.includes('__ModuleLoader__'), '客户端 bundle 应保持宿主 ModuleLoader 加载格式')
   }
 })
+
+// ── 0.4.3 修的真实缺陷：configForms 晚就绪时卡片停在只读形态 ───────────────
+// 现场：截图里「网关选项」「上游后端」两块只有标题、没有任何下拉框与输入框。
+// 原因是 `ctx.get('configForms')` 在 apply 时同步探一次，Host 的客户端插件
+// 服务尚未注册就永远拿不到 → settingsScope 恒为 undefined → 走只读降级分支。
+
+test('client bundle：configForms 晚于卡片就绪时，晚到后仍渲染出可编辑输入框', async () => {
+  const { exports, react } = loadClientBundle()
+  const lateCallbacks = []
+  const slotRegistrations = []
+  const track = handle => {
+    slotRegistrations.push(handle)
+    return () => {
+      const index = slotRegistrations.indexOf(handle)
+      if (index >= 0) slotRegistrations.splice(index, 1)
+    }
+  }
+  const forms = {
+    whileServed: (candidates, register) => {
+      const dispose = register(new Set(candidates))
+      return dispose
+    },
+    get: ns => ({ namespace: ns }),
+  }
+  const registeredCopy = {}
+  const ctx = {
+    effect: (fn) => { fn() },
+    // apply 时 configForms 还没注册
+    get: () => undefined,
+    inject: (names, callback) => { lateCallbacks.push({ names, callback }) },
+    slots: {
+      inject: (name, setup) => {
+        const handle = { name }
+        const inner = setup()
+        const unregister = track(handle)
+        return () => { unregister(); if (typeof inner === 'function') inner() }
+      },
+      register: (entry, component) => track({ entry, component }),
+    },
+    locale: {
+      register: (ns, copy) => { registeredCopy[ns] = copy },
+      bind: ns => key => registeredCopy[ns]?.zh?.[key] ?? `${ns}:${key}`,
+    },
+  }
+  exports.apply(ctx)
+  // 宿主稍后注册 configForms，cordis 触发 inject 回调
+  assert.equal(lateCallbacks.length, 1, '应通过 ctx.inject 等待 configForms')
+  assert.deepEqual(lateCallbacks[0].names, ['configForms'])
+  lateCallbacks[0].callback({ configForms: forms })
+
+  const section = slotRegistrations.find(entry => entry.entry?.name === 'settings.section')
+  assert.ok(section, '晚绑定后必须重新注册插槽（渲染器按 entry 身份缓存 inject 结果）')
+  const props = section.entry.inject()
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ setup: { ready: true, steps: [] }, cli: null, login: null }) })
+  try {
+    // onRerender 注册回调后，fetch 落定的 setState 会重写 box.tree
+    const box = react.onRerender(section.component, props)
+    box.tree = react.render(section.component, props)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const inputs = []
+    const walk = node => {
+      if (node === null || node === undefined || typeof node !== 'object') return
+      // 假 react 的元素形状是 { type, props, children }（type 是标签名或组件）
+      const tag = node.type ?? ''
+      if (tag === 'select' || tag === 'input') inputs.push(node)
+      for (const child of Array.isArray(node.children) ? node.children : []) walk(child)
+    }
+    walk(box.tree)
+    const selects = inputs.filter(node => node.type === 'select')
+    assert.ok(selects.length >= 4, `应渲染出后端与网关下拉框，实际 ${selects.length} 个 select`)
+    assert.ok(inputs.some(node => node.type === 'input' && node.props?.type === 'text'), '应渲染出 cliPath/cliWorkspace 文本框')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
