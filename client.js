@@ -259,6 +259,13 @@ window.__ModuleLoader__.load({
             setStatus(current => ({ ...(current ?? {}), cli: data }))
             setStatusError(false)
           }
+          // CLI 探测结果会改变「当前生效」的后端与模型清单（auto 下登录后切到 cli），
+          // 所以顺带重拉整份 status，别让那块只读测量值停在旧值。
+          const snapshot = await fetch(STATUS_PATH, { headers: { accept: 'application/json' } })
+          if (snapshot.ok) {
+            setStatus(await snapshot.json())
+            setStatusError(false)
+          }
         } catch {} finally {
           setRefreshing(false)
         }

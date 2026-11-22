@@ -218,6 +218,9 @@ export function apply(ctx, config) {
       backend: backendOf(),
       // 实际生效的接入方式与「当前后端的模型清单」——设置卡片据此说明现在列的是哪一套
       effectiveBackend: effectiveBackend(),
+      // settings 命名空间：模型页靠它精确匹配 `namespaces.has(settingsNs)`，
+      // 对不上整行不渲染，所以把它暴露出来便于排查
+      settingsNs,
       models: models().map(model => model.id),
       defaultModel: defaultModel(),
       cli: { ...cliState, models: cliModels.map(model => model.id) },
