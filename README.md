@@ -92,7 +92,7 @@ pnpm remove dsh-connect-doubaowork && pnpm add file:/绝对路径/dsh-connect-do
 
 | 步骤 | 说明 |
 | --- | --- |
-| 豆包登录态（HTTP 后端） | 凭据文件是否存在、能否解析、是否含 `sessionid`、账号数；权限过宽（如 644）会提示 `chmod 600` |
+| 豆包登录态（HTTP 后端） | 凭据文件是否存在、能否解析、是否含 `sessionid`、账号数；权限过宽（如 644）会提示 `chmod 600`；账号若来自**豆包桌面端自动发现**（无凭据文件）会明确标注来源，不会静默读取 |
 | 豆包 CLI（推荐） | `doubao` 命令是否可用、版本号、是否已登录 |
 | 可用接入方式 | 至少一条通才算就绪；都不通时明确告知「模型调用会返回 503」 |
 
@@ -270,7 +270,7 @@ HTTP 后端需要豆包登录态；如果只用 CLI 后端（`backend: "cli"`）
 node --test "tests/*.test.js"
 ```
 
-114 个用例，覆盖协议解析、网关、账号池、保活巡检、CLI 后端（NDJSON 事件、串行队列、探测、超时/取消）、目录合并与设置卡片渲染。CLI 相关用例全部用假子进程（`EventEmitter` + `Readable`）驱动，不依赖本机是否装了豆包 CLI；`tests/onboarding.test.js` 的 12 个用例覆盖首次引导的三态与隐私回归；`tests/client.test.js` 用带 hooks 槽位的假 react 真正驱动卡片重渲染（含引导区块渲染）。
+116 个用例，覆盖协议解析、网关、账号池、保活巡检、CLI 后端（NDJSON 事件、串行队列、探测、超时/取消）、目录合并与设置卡片渲染。CLI 相关用例全部用假子进程（`EventEmitter` + `Readable`）驱动，不依赖本机是否装了豆包 CLI；`tests/onboarding.test.js` 的 12 个用例覆盖首次引导的三态与隐私回归；`tests/client.test.js` 用带 hooks 槽位的假 react 真正驱动卡片重渲染（含引导区块渲染）。
 
 纯 ESM JavaScript，零构建、零运行时依赖（仅 Node 内置模块 + 宿主 peer 包）。
 

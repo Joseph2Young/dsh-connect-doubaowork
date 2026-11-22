@@ -92,6 +92,44 @@ test('引导：CLI 已安装但未登录 → warn，提示只差 doubao login', 
   }
 })
 
+test('引导：账号来自桌面端自动发现 → 明确告知用户（不是静默读取）', async () => {
+  const ws = tmpWorkspace()
+  try {
+    const emptyFile = path.join(ws.dir, 'absent.json')
+    // 造一个假的 Local State：x-tt-multi-sids 形态
+    const localStatePath = ws.write('Local State', JSON.stringify({
+      saman: { local_storage_app_for_web: JSON.stringify({ 'x-tt-multi-sids': '12345%3Asid-value' }) },
+      aha: { device: { device_id: 'dev', web_id: 'web' } },
+    }))
+    const result = await inspectSetup({
+      credentialsFile: emptyFile,
+      autoDiscover: true,
+      probe: probeOf({ installed: true, version: '2.37.2', loggedIn: false }),
+      // 注入桌面端路径（走 loadAccountList 的默认常量不好改，这里直接给 account）
+      account: { cookie: 'sessionid=from-app; sessionid_ss=from-app', device_id: 'dev' },
+    })
+    // 无凭据文件但有账号 → 说明来自桌面端发现
+    assert.equal(result.summary.httpReady, true)
+    assert.equal(result.summary.fromDesktopApp, true)
+    assert.match(stepOf(result, 'credentials').detail, /自动发现/)
+    assert.match(stepOf(result, 'credentials').detail, /autoDiscoverCredentials/)
+  } finally {
+    ws.cleanup()
+  }
+})
+
+test('引导：凭据文件存在时不该被标成「桌面端发现」', async () => {
+  const ws = tmpWorkspace()
+  try {
+    const file = ws.write('credentials.json', JSON.stringify({ cookie: 'sessionid=abc' }))
+    const result = await inspectSetup({ credentialsFile: file, autoDiscover: false, probe: probeOf({}) })
+    assert.equal(result.summary.fromDesktopApp, false)
+    assert.doesNotMatch(stepOf(result, 'credentials').detail, /桌面端/)
+  } finally {
+    ws.cleanup()
+  }
+})
+
 test('引导：只有凭据文件（单账号）→ 可用，建议 http', async () => {
   const ws = tmpWorkspace()
   try {

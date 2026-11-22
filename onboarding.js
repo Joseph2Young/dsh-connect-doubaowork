@@ -102,6 +102,9 @@ export async function inspectSetup({
 
   const httpReady = accounts.length > 0
   const cliReady = cli.installed === true && cli.loggedIn === true
+  // 凭据文件不存在但拿到了账号 → 只可能是读了豆包桌面端，必须在引导里说清楚，
+  // 这是「插件读了另一个 App 的登录态」，不能让用户不知情
+  const fromDesktopApp = httpReady && files.exists !== true
 
   const steps = []
 
@@ -111,7 +114,9 @@ export async function inspectSetup({
     title: '豆包登录态（HTTP 后端）',
     status: httpReady ? STEP_STATUS.done : STEP_STATUS.todo,
     detail: httpReady
-      ? `已配置 ${accounts.length} 个账号`
+      ? fromDesktopApp
+        ? `已从豆包桌面端自动发现 ${accounts.length} 个账号（未配置凭据文件；可在配置里关掉 autoDiscoverCredentials）`
+        : `已配置 ${accounts.length} 个账号`
       : files.exists
         ? files.parseable === false
           ? `凭据文件无法解析：${effectiveCredentialsPath}`
@@ -190,6 +195,7 @@ export async function inspectSetup({
       cliLoggedIn: cli.loggedIn === true,
       cliVersion: cli.version,
       accountCount: accounts.length,
+      fromDesktopApp,
       credentialsPath: effectiveCredentialsPath,
     },
   }
