@@ -257,6 +257,12 @@ export function apply(ctx, config) {
   // provider 注册成功后才有 adapter 可刷；CLI 探测与引导检查不依赖它，
   // 因此单独持有引用，注册失败时设置卡片仍能看到 CLI 状态。
   let adapterApi = null
+  // 用户在设置里改了「后端」或「模型清单」后，pi-ai 的目录快照必须换身份，
+  // 否则模型选择器一直显示旧后端的模型。volatile 改动不重挂插件，只能靠这个事件。
+  ctx.on?.('loader/volatile-update', () => {
+    if (stopped) return
+    adapterApi?.invalidate()
+  })
   // 探测 CLI（子进程 --version / auth status，约 0.6s）与首次引导检查。
   // 都在注册前后判一次 stopped，避免插件已卸载还去拉子进程。
   const scheduleProbes = () => {

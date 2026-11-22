@@ -1,4 +1,5 @@
 import { test } from 'node:test'
+import { readFile } from 'node:fs/promises'
 import assert from 'node:assert/strict'
 import { createDoubaoAdapter, toPiModel, DOUBAO_STREAM_IDLE_TIMEOUT_MS } from '../adapter.js'
 import { bootstrap, bindSettingsNamespace } from '../plugin.js'
@@ -261,4 +262,12 @@ test('bindSettingsNamespace：宿主拒绝重复 configure 时降级为 debug �
   assert.equal(logLines.length, 1)
   assert.equal(logLines[0][0], 'debug')
   assert.match(logLines[0][1], /already configured/)
+})
+
+test('index.js 监听 loader/volatile-update 以刷新 pi-ai 目录', async () => {
+  // volatile 改动不重挂插件（值是就地更新），宿主只会 emit 这个事件。
+  // 不监听的话用户把 backend 从 cli 改成 http，模型选择器仍列 CLI 那一套。
+  const source = await readFile(new URL('../index.js', import.meta.url), 'utf8')
+  assert.match(source, /loader\/volatile-update/)
+  assert.match(source, /adapterApi\?\.invalidate\(\)/)
 })
