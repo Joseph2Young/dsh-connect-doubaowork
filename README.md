@@ -57,6 +57,8 @@ DSH 宿主 ──pi-ai──▶ 本地回环网关 ──┤   （构造工作�
 - **HTTP 后端生效**：模型清单就是上表 10 项（不发 `doubao model list`）。
 - **CLI 后端生效**：模型清单是 CLI 实报的模型。能对上的条目复用上表的友好 ID 与元信息（例如 CLI 的 `person-deepseek-v4-1-flash-261017` 显示为 `deepseek-v4-flash`，`ratio`/上下文窗口沿用静态表），CLI 独有的新模型按 CLI 原样追加（`cliOnly`，只有 CLI 后端能路由）。未登录或拉取失败时回落上表，不会出现空路由。
 
+**CLI 后端会把友好 ID 翻译成上游 ID 再传给 `--model`**：`doubao` 只认 `doubao model list` 报的 `person-*`/数字 ID，直传 `deepseek-v4-flash` 会报「`--model` 参数非法：不支持此模型」。翻译由 `catalog.js` 的 `upstreamId(entry, 'cli')` 完成（0.5.1 修）。`auto` 不传 `--model`，交给 CLI 自己的默认模型。
+
 也就是说：**同一个模型不会在模型选择器里出现两次**——之前 0.4.x 把两套清单合并成一份（静态 10 项 + CLI 13 项 = 23 项，其中 10 项语义重复），0.5.0 起改成二选一。默认模型也跟着后端走：CLI 后端取 CLI 标 `is_default` 的那个（反查回友好 ID），HTTP 后端用 `deepseek-v4-flash`。
 
 
