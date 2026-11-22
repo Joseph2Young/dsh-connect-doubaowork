@@ -324,3 +324,28 @@ test('routes：插件先卸载、webServer 后上线时，晚到的挂载会自�
   assert.ok(routes.length > 0, '回调确实投递了')
   assert.ok(routes.every(entry => entry.disposed === true), '晚到注册的路由必须立刻被注销')
 })
+
+// ── cordis scope 形态：与 dsh-connect-workbuddy 一致的 webCtx.effect 挂载 ──
+test('routes：webServer 上下文带 effect 时，通过 effect 管理路由生命周期（cordis 形态）', () => {
+  const routes = []
+  const webServer = { register: entry => { routes.push(entry); return () => { entry.disposed = true } } }
+  const cleanups = []
+  let effectLabel = ''
+  const webCtx = {
+    webServer,
+    effect: (callback, label) => {
+      effectLabel = label
+      cleanups.push(callback())
+    },
+  }
+  const ctx = {
+    get: () => { throw new Error('有 inject 时应走 inject') },
+    inject: (names, callback) => callback(webCtx),
+  }
+  const dispose = registerPluginRoutes(ctx, makeDeps())
+  assert.equal(routes.length, 7, '七条路由都该登记')
+  assert.match(effectLabel, /dsh-connect-doubaowork/, 'effect 应带可读标签便于宿主排查')
+  assert.equal(typeof cleanups[0], 'function', 'effect 回调要返回注销函数')
+  dispose()
+  assert.ok(routes.every(entry => entry.disposed === true), '卸载后路由全部注销')
+})

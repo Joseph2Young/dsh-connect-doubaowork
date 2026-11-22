@@ -307,12 +307,12 @@ HTTP 后端需要豆包登录态；如果只用 CLI 后端（`backend: "cli"`）
 node --test "tests/*.test.js"
 ```
 
-152 个用例，覆盖协议解析、网关、账号池、保活巡检、CLI 后端（NDJSON 事件、串行队列、探测、超时/取消）、扫码登录、插件路由、目录合并与设置卡片渲染。
+153 个用例，覆盖协议解析、网关、账号池、保活巡检、CLI 后端（NDJSON 事件、串行队列、探测、超时/取消）、扫码登录、插件路由、目录合并与设置卡片渲染。
 
 - CLI 与登录相关用例全部用假子进程（`EventEmitter` + `Readable`）驱动，不依赖本机是否装了豆包 CLI；
 - `tests/onboarding.test.js`（14 例）覆盖首次引导的三态与隐私回归；
 - `tests/login.test.js`（18 例）覆盖二维码解析、conflict/不可用/未安装三种失败、文件晚落盘重试、单实例复用、过期与取消、**伪造 PNG 不被当图片回传**；
-- `tests/routes.test.js`（15 例）覆盖方法闸、loopback 闸、能力缺席不注册、poll 读 body、卸载回收，以及**启动顺序回归**（webServer 晚于插件就绪、插件先卸载而挂载晚到）；
+- `tests/routes.test.js`（16 例）覆盖方法闸、loopback 闸、能力缺席不注册、poll 读 body、卸载回收，以及**启动顺序回归**（webServer 晚于插件就绪、插件先卸载而挂载晚到）；
 - `tests/client.test.js` 用带 hooks 槽位的假 react 真正驱动卡片重渲染（含引导区块与登录区块）。
 
 纯 ESM JavaScript，零构建、零运行时依赖（仅 Node 内置模块 + 宿主 peer 包）。

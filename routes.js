@@ -76,10 +76,11 @@ export function registerPluginRoutes(ctx, deps) {
    */
   if (typeof ctx?.inject !== 'function' && typeof ctx?.get !== 'function') return () => {}
   // 插件已被卸载后，晚到的挂载必须立刻自我注销，否则会留下一批没人负责的路由。
-  // （只对「卸载早于 webServer 上线」这种时序有意义，但不加就必然是泄漏。）
+  // cordis 通常不会在 scope 销毁后再回调 inject，但这层防护让行为不依赖该假设。
   let disposed = false
-  let outerDisposer = null
+  let disposeMounted = null
 
+  /** 在拿到 webServer 的上下文上登记路由；返回注销函数。 */
   const mount = (webCtx) => {
     const webServer = webCtx?.webServer ?? webCtx?.get?.('webServer')
     if (!webServer || typeof webServer.register !== 'function') return () => {}
@@ -87,27 +88,44 @@ export function registerPluginRoutes(ctx, deps) {
     const route = (entry) => disposers.push(webServer.register(entry))
     registerAll(route, deps)
     return () => {
-      for (const dispose of disposers) {
+      for (const dispose of disposers.splice(0)) {
         try {
           dispose?.()
         } catch {}
       }
-      disposers.length = 0
     }
+  }
+
+  /**
+   * 与 dsh-connect-workbuddy 相同的形态：在 inject 回调里用 `webCtx.effect`
+   * 把「登记 + 注销」交给 cordis 的 scope 管理，服务下线/插件卸载时自动清理。
+   */
+  const mountInScope = (webCtx) => {
+    if (typeof webCtx?.effect !== 'function') return mount(webCtx)
+    let dispose = null
+    webCtx.effect(() => {
+      dispose = mount(webCtx)
+      return () => {
+        const run = dispose
+        dispose = null
+        run?.()
+      }
+    }, 'dsh-connect-doubaowork: plugin routes')
+    return () => dispose?.()
   }
 
   if (typeof ctx?.inject === 'function') {
     ctx.inject(['webServer'], (webCtx) => {
-      const dispose = mount(webCtx)
+      const dispose = mountInScope(webCtx)
       if (disposed) dispose()
-      else outerDisposer = dispose
+      else disposeMounted = dispose
     })
     return () => {
       disposed = true
       try {
-        outerDisposer?.()
+        disposeMounted?.()
       } catch {}
-      outerDisposer = null
+      disposeMounted = null
     }
   }
 
