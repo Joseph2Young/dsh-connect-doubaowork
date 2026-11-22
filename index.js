@@ -253,6 +253,30 @@ export function apply(ctx, config) {
     void shim.close()
   })
 
+  // provider 注册成功后才有 adapter 可刷；CLI 探测与引导检查不依赖它，
+  // 因此单独持有引用，注册失败时设置卡片仍能看到 CLI 状态。
+  let adapterApi = null
+  // 探测 CLI（子进程 --version / auth status，约 0.6s）与首次引导检查。
+  // 都在注册前后判一次 stopped，避免插件已卸载还去拉子进程。
+  const scheduleProbes = () => {
+    void refreshCli().then(state => {
+      if (stopped) return
+      if (state.models.length > 0) adapterApi?.invalidate()
+    }).catch(error => {
+      if (!stopped) log('warn', `豆包 CLI 探测失败（不影响 HTTP 后端）：${error?.message ?? error}`)
+    })
+    void refreshSetup().then(state => {
+      if (stopped) return
+      if (state.ready === true) {
+        log('info', `豆包插件就绪（${state.summary?.cliReady ? 'CLI' : 'HTTP'} 接入可用）`)
+        return
+      }
+      log('warn', `豆包插件尚未配置完成，模型调用会失败。修复步骤：\n${formatSetupGuide(state)}`)
+    }).catch(error => {
+      if (!stopped) log('warn', `豆包首次使用引导检查失败：${error?.message ?? error}`)
+    })
+  }
+
   void shim.start()
     .then(async () => {
       if (stopped) return
@@ -285,30 +309,19 @@ export function apply(ctx, config) {
         adapter,
         models,
       })
+      adapterApi = adapter
       const backend = effectiveBackend()
       log('info', `豆包工作模式网关已就绪：${shim.baseUrl()}（后端：${backend}；模型：${models().map(m => m.id).join(', ')}）`)
       // CLI 探测放到注册之后：探测要拉两次子进程（--version/auth status），
       // 不该阻塞 provider 上线；探测完成后目录会自然热更新（getModels 是 live 的）
-      void refreshCli().then(state => {
-        if (!stopped && state.models.length > 0) adapter.invalidate()
-      }).catch(error => {
-        if (!stopped) log('warn', `豆包 CLI 探测失败（不影响 HTTP 后端）：${error?.message ?? error}`)
-      })
-      // 首次使用引导：没有任何可用接入方式时把完整步骤打进日志，
-      // 这样用户即使还没打开设置页，也能在日志里看到「该装什么、该跑什么」
-      void refreshSetup().then(state => {
-        if (stopped) return
-        if (state.ready === true) {
-          log('info', `豆包插件就绪（${state.summary?.cliReady ? 'CLI' : 'HTTP'} 接入可用）`)
-          return
-        }
-        log('warn', `豆包插件尚未配置完成，模型调用会失败。修复步骤：\n${formatSetupGuide(state)}`)
-      }).catch(error => {
-        if (!stopped) log('warn', `豆包首次使用引导检查失败：${error?.message ?? error}`)
-      })
+      scheduleProbes()
     })
     .catch(error => {
-      if (!stopped) log('error', 'loopback endpoint failed to start; providers not registered', error)
+      if (stopped) return
+      log('error', 'loopback endpoint failed to start; providers not registered', error)
+      // provider 注册失败也要探测：设置卡片得能显示 CLI/凭据到底什么状态，
+      // 否则用户看到的是一张全空白的卡片，无从判断该修哪一步。
+      scheduleProbes()
     })
 }
 
