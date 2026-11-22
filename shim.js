@@ -85,6 +85,8 @@ export function createDoubaoShim(options) {
   let port = 0
   let closed = false
   let conversations = new Map()
+  // CLI 后端不转发宿主 tools 的提示只打一次，避免每轮刷屏
+  let warnedCliTools = false
   // 账号池粘性轮换锚点：上次成功请求的账号 id（'', 初始未定）
   const state = { lastGoodId: '' }
 
@@ -259,6 +261,13 @@ export function createDoubaoShim(options) {
     // 会话归属：single 模式下 convKey 已是固定键，per-chat 模式下每键各一条，
     // 两种情况都从同一个 conversations 表取绑定会话
     const boundSession = previous?.conversationId ?? ''
+
+    // 宿主带来的 tools 不转发：豆包工作模式是「豆包自己当 agent」，它用 CLI 自带的
+    // 工具执行能力，而不是宿主定义的工具集。这里只提示一次，避免误以为工具在传
+    if (Array.isArray(payload?.tools) && payload.tools.length > 0 && warnedCliTools === false) {
+      warnedCliTools = true
+      log('info', `CLI 后端不转发宿主 tools（收到 ${payload.tools.length} 个）：豆包工作模式使用 CLI 自带工具，宿主工具仅 HTTP 后端可用`)
+    }
 
     // 首轮（无绑定会话）把历史压平，续轮只发最后一条 user 文本（历史已在 CLI 侧）
     const prompt = boundSession === ''
