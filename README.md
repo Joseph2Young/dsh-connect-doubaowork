@@ -71,6 +71,12 @@ cd ~/.dsh/profiles/<你的 profile>
 pnpm add file:/绝对路径/dsh-connect-doubaowork
 ```
 
+改了源码要重新同步时，**必须 `remove` 再 `add`**：pnpm 对 `file:` 依赖是实体拷贝而非软链，直接 `add` 会报 “Already up to date” 而不更新文件。
+
+```sh
+pnpm remove dsh-connect-doubaowork && pnpm add file:/绝对路径/dsh-connect-doubaowork
+```
+
 > 注意：请用 `file:` 而不是 `link:`。本插件把 `@deepseek-ai/*`、`@earendil-works/pi-ai` 声明为 peerDependencies，`link:` 建立的软链不会从目标目录解析 peer 包，会导致宿主加载失败。
 
 ## 豆包 CLI 后端（推荐）
