@@ -7,6 +7,11 @@
  *
  * 仅监听 127.0.0.1 随机端口；bearer token 进程内随机生成，凭据不落盘、不外发
  * （除发给豆包上游）。
+ *
+ * 双后端：
+ *   - http（默认）：直接打豆包工作模式 HTTP 端点，靠 sessionid Cookie；
+ *   - cli：拉起 `doubao -p … --output-format stream-json` 子进程，靠 CLI 自有登录态。
+ *   由 defaults.backend（auto/cli/http）与 cliAvailable() 决定实际走哪条。
  */
 import http from 'node:http'
 import { randomBytes, randomUUID } from 'node:crypto'
@@ -24,6 +29,31 @@ function randomToken() {
   return randomBytes(24).toString('base64url')
 }
 
+/** 把 OpenAI 消息数组压平成一段文本（CLI 单提示词入参用）。 */
+function flattenMessages(messages, includeLast = true) {
+  const lines = []
+  const limit = includeLast ? messages.length : messages.length - 1
+  for (let i = 0; i < limit; i++) {
+    const message = messages[i]
+    const text = extractText(message?.content).trim()
+    if (text === '') continue
+    const role = String(message?.role ?? 'unknown')
+    const label = role === 'user' ? '用户' : role === 'assistant' ? '助手' : role === 'system' ? '系统' : role
+    lines.push(`${label}：${text}`)
+  }
+  return lines.join('\n')
+}
+
+/** 最后一条 user 消息的纯文本（CLI 续会话时的增量提示词）。 */
+function lastUserText(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (String(messages[i]?.role ?? '') !== 'user') continue
+    return extractText(messages[i]?.content).trim()
+  }
+  return ''
+}
+
+
 /**
  * @param {object} options
  * @param {() => Array<{id:string}>} options.catalog 运行时目录
@@ -34,6 +64,8 @@ function randomToken() {
  * @param {typeof fetch} [options.fetchImpl] 测试可注入
  * @param {object} options.defaults 运行参数（normalizeConfig + DOUBAO_DEFAULTS 合并结果）
  * @param {(level: string, message: string, error?: unknown) => void} [options.log]
+ * @param {object} [options.cli] CLI 后端 { available(): boolean, run(task): Promise<object>, client? }
+ *   available() 返回 true 且 backend 允许时，聊天请求走 CLI 子进程而非 HTTP。
  */
 export function createDoubaoShim(options) {
   const {
@@ -45,6 +77,7 @@ export function createDoubaoShim(options) {
     fetchImpl = fetch,
     defaults,
     log = () => {},
+    cli = null,
   } = options
 
   const token = randomToken()
@@ -89,6 +122,15 @@ export function createDoubaoShim(options) {
 
   function toModelEntry(entry) {
     return { id: entry.id, object: 'model', created: 0, owned_by: 'doubao-workmode' }
+  }
+
+  /** 当前生效的后端：'cli' 或 'http'。auto 下 CLI 可用就优先 CLI。 */
+  function activeBackend() {
+    const wanted = defaults.backend ?? 'auto'
+    if (wanted === 'http') return 'http'
+    const usable = cli !== null && typeof cli.available === 'function' && cli.available() === true
+    if (wanted === 'cli') return 'cli'
+    return usable ? 'cli' : 'http'
   }
 
   async function handle(req, res) {
@@ -204,6 +246,150 @@ export function createDoubaoShim(options) {
     return url.toString()
   }
 
+  /**
+   * CLI 后端：把一次 OpenAI chat 请求翻译成 `doubao -p … --output-format stream-json`。
+   *
+   * 与 HTTP 后端的差异（都是有意的）：
+   *   - 会话归属由 CLI 的 session_id 承载，不再需要 conversation_id 协调；
+   *   - single 模式下复用同一个 CLI session（--resume），保证豆包侧只有一条记录；
+   *   - per-chat 模式下每个 convKey 各自绑定一条 CLI session；
+   *   - CLI 自带工具执行/文件能力，工具事件只记日志，不冒充 OpenAI delta。
+   */
+  async function handleCliChat(res, { payload, messages, entry, convKey, previous, isStream }) {
+    // 会话归属：single 模式下 convKey 已是固定键，per-chat 模式下每键各一条，
+    // 两种情况都从同一个 conversations 表取绑定会话
+    const boundSession = previous?.conversationId ?? ''
+
+    // 首轮（无绑定会话）把历史压平，续轮只发最后一条 user 文本（历史已在 CLI 侧）
+    const prompt = boundSession === ''
+      ? flattenMessages(messages, true) || lastUserText(messages)
+      : lastUserText(messages)
+    if (prompt === '') {
+      fail(res, 400, '没有可发送的用户文本')
+      return
+    }
+
+    const id = 'chatcmpl-' + shortHash(convKey)
+    const created = Math.floor(Date.now() / 1000)
+    const controller = new AbortController()
+    const timer = setTimeout(
+      () => controller.abort(new Error('CLI 请求超时')),
+      Math.max(1, defaults.timeoutSeconds) * 1000,
+    )
+    let finished = false
+    res.on('close', () => {
+      if (!finished) controller.abort(new Error('客户端断开'))
+    })
+
+    if (isStream) {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      })
+      res.flushHeaders()
+    }
+
+    const writeDelta = (delta, finishReason = null) => {
+      res.write(`data: ${JSON.stringify({
+        id,
+        object: 'chat.completion.chunk',
+        created,
+        model: entry.id,
+        choices: [{ index: 0, delta, finish_reason: finishReason }],
+      })}\n\n`)
+    }
+
+    let wrote = false
+    let finalText = ''
+    let lastError = ''
+
+    const heartbeat = isStream && defaults.heartbeatSeconds > 0
+      ? setInterval(() => {
+        if (!finished) res.write(': ping\n\n')
+      }, defaults.heartbeatSeconds * 1000)
+      : null
+
+    let outcome
+    try {
+      outcome = await cli.run({
+        prompt,
+        // 模型：CLI 用模型 ID 直传；目录里的 id 就是 CLI 的 modelId
+        model: entry.id === 'auto' ? '' : entry.id,
+        effort: defaults.cliEffort ?? '',
+        sessionId: boundSession,
+        signal: controller.signal,
+        onInit(sessionId) {
+          rememberConversation(convKey, sessionId, 'cli')
+        },
+        onDelta(text) {
+          wrote = true
+          finalText += text
+          if (isStream) writeDelta({ content: text })
+        },
+        onTool(tools) {
+          for (const tool of tools) log('info', `CLI 工具调用：${tool.name}${tool.status === '' ? '' : ` (${tool.status})`}`)
+        },
+        onStray(text) {
+          lastError = text
+        },
+      })
+    } catch (error) {
+      outcome = { ok: false, errors: [String(error?.message ?? error)], sessionId: boundSession, text: '' }
+    }
+
+    finished = true
+    clearTimeout(timer)
+    if (heartbeat !== null) clearInterval(heartbeat)
+
+    if (!outcome.ok) {
+      const detail = outcome.errors.filter(item => item !== '').join('; ') || lastError || '豆包 CLI 调用失败'
+      if (!wrote) {
+        if (isStream && res.headersSent) {
+          writeDelta({ content: `调用豆包 CLI 失败：${detail}` })
+          writeDelta({}, 'stop')
+          res.write('data: [DONE]\n\n')
+          res.end()
+          return
+        }
+        fail(res, 502, `调用豆包 CLI 失败：${detail}`)
+        return
+      }
+      log('warn', `CLI 任务以失败收尾但有部分输出：${detail}`)
+    }
+
+    if (outcome.sessionId !== '' && outcome.sessionId !== boundSession) {
+      rememberConversation(convKey, outcome.sessionId, 'cli')
+    }
+    if (outcome.text !== '' && finalText === '') {
+      finalText = outcome.text
+      wrote = true
+      if (isStream) writeDelta({ content: finalText })
+    }
+
+    if (isStream) {
+      if (!wrote) writeDelta({ content: '(空响应)' })
+      writeDelta({}, 'stop')
+      res.write('data: [DONE]\n\n')
+      res.end()
+      return
+    }
+    if (finalText === '') {
+      fail(res, 502, '豆包 CLI 没有返回内容')
+      return
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({
+      id,
+      object: 'chat.completion',
+      created,
+      model: entry.id,
+      choices: [{ index: 0, message: { role: 'assistant', content: finalText }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+    }))
+  }
+
   async function handleChat(req, res, raw) {
     let payload
     try {
@@ -217,7 +403,7 @@ export function createDoubaoShim(options) {
       fail(res, 400, 'messages 不能为空')
       return
     }
-    const entry = resolveModel(payload?.model) ?? resolveModel(defaults.defaultModel)
+    const entry = resolveModel(payload?.model, catalog()) ?? resolveModel(defaults.defaultModel, catalog())
     if (entry === undefined) {
       fail(res, 400, `未知模型: ${payload?.model}`)
       return
@@ -227,15 +413,22 @@ export function createDoubaoShim(options) {
       ? SINGLE_CONVERSATION_KEY
       : conversationKey(payload, messages)
     const previous = conversations.get(convKey)
+    const isStream = payload?.stream !== false
+
+    // CLI 后端：可用且未被配置排除时，整条请求交给 CLI 子进程
+    if (activeBackend() === 'cli') {
+      await handleCliChat(res, { payload, messages, entry, convKey, previous, isStream })
+      return
+    }
+
     const candidates = orderedAccounts(convKey)
     if (candidates.length === 0) {
-      fail(res, 503, '豆包凭据未配置：请创建 ~/.dsh-doubao/credentials.json（完整 cookie + device_id），或在设置页添加账号')
+      fail(res, 503, '豆包凭据未配置：请创建 ~/.dsh-doubao/credentials.json（完整 cookie + device_id），或在设置页添加账号；或安装豆包 CLI 并执行 doubao login 后改用 CLI 后端')
       return
     }
     // 池故障转移：只在「请求尚未触达成功响应」阶段换账号重试（流头已写则无法回退）
     const pool = defaults.poolEnabled === true && candidates.length > 1
 
-    const isStream = payload?.stream !== false
     const controller = new AbortController()
     const timer = setTimeout(
       () => controller.abort(new Error('上游请求超时')),

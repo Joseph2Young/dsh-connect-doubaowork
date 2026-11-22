@@ -39,6 +39,7 @@ test('createConfigSchema 字段种类与默认值', () => {
     'enabledModelIds', 'workMode', 'reasoningEffort', 'autoDiscoverCredentials',
     'credentialsFile', 'chatUrl', 'userAgent', 'timeoutSeconds', 'heartbeatSeconds', 'flattenHistory',
     'conversationMode', 'account', 'poolEnabled', 'keepaliveEnabled',
+    'backend', 'cliPath', 'cliWorkspace', 'cliPermissionMode', 'cliConcurrency', 'cliEffort',
   ])
   assert.equal(fields.enabledModelIds.kind, 'array')
   assert.deepEqual(fields.enabledModelIds.defaultValue, [])

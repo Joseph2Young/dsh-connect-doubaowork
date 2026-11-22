@@ -33,28 +33,83 @@ export const DOUBAO_MODEL_ALIASES = Object.freeze({
   deepseek: 'deepseek-v4-flash',
 })
 
-/** 按 id / 别名 / 上游 model_item_key 解析目录条目；解析失败返回 undefined。 */
-export function resolveModel(idOrKey) {
+/**
+ * 按 id / 别名 / 上游 model_item_key 解析目录条目；解析失败返回 undefined。
+ * @param {string} idOrKey
+ * @param {Array<object>} [base] 基础目录（默认静态表；CLI 清单合并后的目录由调用方传入）
+ */
+export function resolveModel(idOrKey, base = DOUBAO_MODELS) {
   const id = String(idOrKey ?? '').trim()
   if (id === '') return undefined
+  const source = Array.isArray(base) && base.length > 0 ? base : DOUBAO_MODELS
   const wanted = DOUBAO_MODEL_ALIASES[id] ?? id
-  return DOUBAO_MODELS.find(model => model.id === wanted || model.modelItemKey === wanted)
+  return source.find(model => model.id === wanted || model.modelItemKey === wanted)
 }
 
 /**
  * 计算运行时目录：enabledIds 为空 = 全部启用；否则按集合过滤（别名先归一）。
  * 过滤结果为空时回落全部目录，避免出现不可用的空路由。
  * @param {string[]} [enabledIds]
+ * @param {Array<object>} [base] 基础目录（默认静态表；CLI 清单合并后由调用方传入）
  * @returns {Array<{id:string,name:string,modelItemKey:string,ratio:string,contextWindow:number,maxTokens:number}>}
  */
-export function deriveCatalog(enabledIds) {
+export function deriveCatalog(enabledIds, base = DOUBAO_MODELS) {
+  const source = Array.isArray(base) && base.length > 0 ? base : DOUBAO_MODELS
   const raw = Array.isArray(enabledIds) ? enabledIds : []
-  if (raw.length === 0) return [...DOUBAO_MODELS]
+  if (raw.length === 0) return [...source]
   const wanted = new Set()
   for (const entry of raw) {
     const resolved = resolveModel(entry)
     wanted.add(resolved === undefined ? String(entry) : resolved.id)
   }
-  const picked = DOUBAO_MODELS.filter(model => wanted.has(model.id))
-  return picked.length > 0 ? picked : [...DOUBAO_MODELS]
+  const picked = source.filter(model => wanted.has(model.id))
+  return picked.length > 0 ? picked : [...source]
 }
+
+/**
+ * 把 CLI 动态清单（model list --json 产物）合并进静态目录。
+ *
+ * 合并规则：
+ *   - CLI 有的 id：用 CLI 的 displayName 覆盖，保留静态表的 contextWindow/ratio
+ *     （CLI 不报这两项，静态表是唯一来源）；
+ *   - CLI 有、静态表没有：新增条目（contextWindow/maxTokens 给保守默认值，
+ *     modelItemKey 留空 —— HTTP 后端无法路由，仅 CLI 后端可用）；
+ *   - 静态表有、CLI 没有：保留静态条目（HTTP 后端仍可用；CLI 解析失败时也不会掉模型）。
+ *
+ * @param {Array<{id:string,name:string,isDefault?:boolean}>} cliModels
+ * @returns {Array<object>} 合并后的目录（顺序：先静态表原序，再新增项）
+ */
+export function mergeCliModels(cliModels) {
+  const list = Array.isArray(cliModels) ? cliModels : []
+  if (list.length === 0) return [...DOUBAO_MODELS]
+  const byId = new Map(list.map(model => [String(model?.id ?? '').trim(), model]).filter(([id]) => id !== ''))
+  const merged = []
+  for (const base of DOUBAO_MODELS) {
+    const hit = byId.get(base.id)
+    if (hit === undefined) {
+      merged.push(base)
+      continue
+    }
+    byId.delete(base.id)
+    merged.push({
+      ...base,
+      name: String(hit.name ?? '').trim() || base.name,
+      ...(Array.isArray(hit.efforts) && hit.efforts.length > 0 ? { efforts: hit.efforts.map(String) } : {}),
+    })
+  }
+  for (const [id, hit] of byId) {
+    // CLI 独有模型：HTTP 后端没有 model_item_key，只能走 CLI
+    merged.push({
+      id,
+      name: String(hit.name ?? '').trim() || id,
+      modelItemKey: '',
+      ratio: '',
+      contextWindow: 256000,
+      maxTokens: OUTPUT_TOKENS_256K,
+      cliOnly: true,
+      ...(Array.isArray(hit.efforts) && hit.efforts.length > 0 ? { efforts: hit.efforts.map(String) } : {}),
+    })
+  }
+  return merged
+}
+

@@ -18,6 +18,14 @@ export const DOUBAO_DEFAULTS = Object.freeze({
   // 账号池故障转移与每日保活巡检：均 opt-in（默认关），不替用户改变请求行为
   poolEnabled: false,
   keepaliveEnabled: false,
+  // 后端：auto = 装好 CLI 且已登录则用 CLI，否则回落 HTTP 抓包（默认，零配置最省心）
+  backend: 'auto',
+  cliPath: '',
+  cliWorkspace: '',
+  cliPermissionMode: 'ask_risky',
+  cliConcurrency: 1,
+  // CLI 推理强度：空 = 不传 --effort，用模型默认（与 HTTP 侧 reasoningEffort 的 0-4 语义不同，故单列）
+  cliEffort: '',
   workMode: true,
   botId: '7338286299411103781',
   modeId: '3',
@@ -75,6 +83,12 @@ export function createConfigSchema(z) {
     }).description('主账号（兼容旧单账号凭据；账号池的保底成员）'),
     poolEnabled: z.boolean().default(DOUBAO_DEFAULTS.poolEnabled).description('账号池故障转移：请求失败时自动换下一个启用账号重试'),
     keepaliveEnabled: z.boolean().default(DOUBAO_DEFAULTS.keepaliveEnabled).description('每日保活巡检：定时检查各账号 cookie 是否仍被豆包接受并记录健康状态（读操作，默认关）'),
+    backend: z.string().default(DOUBAO_DEFAULTS.backend).description('上游后端：auto = 装好豆包 CLI 且已登录时优先 CLI，否则用 HTTP 抓包（默认）；cli = 只用 CLI；http = 只用 HTTP 抓包'),
+    cliPath: z.string().default('').description('doubao 可执行文件路径；留空自动探测 npm 全局 bin / PATH'),
+    cliWorkspace: z.string().default('').description('CLI 任务工作目录（-C）；留空用用户主目录'),
+    cliPermissionMode: z.string().default(DOUBAO_DEFAULTS.cliPermissionMode).description('CLI 权限模式：ask_always / ask_risky（默认）/ always_allow'),
+    cliConcurrency: z.number().default(DOUBAO_DEFAULTS.cliConcurrency).description('CLI 并发任务上限（CLI 是单账号共享后台，建议保持 1）'),
+    cliEffort: z.string().default('').description('CLI 推理强度：none/minimal/low/medium/high/xhigh/max；留空用模型默认'),
   })
 }
 
@@ -119,7 +133,32 @@ export function normalizeConfig(config) {
     account: normalizeAccountShape(raw.account),
     poolEnabled: pick('poolEnabled', DOUBAO_DEFAULTS.poolEnabled) === true,
     keepaliveEnabled: pick('keepaliveEnabled', DOUBAO_DEFAULTS.keepaliveEnabled) === true,
+    // 后端选择：只认 cli / http，其余一律 auto（含空值与笔误）
+    backend: normalizeBackend(raw.backend),
+    cliPath: typeof raw.cliPath === 'string' ? raw.cliPath.trim() : '',
+    cliWorkspace: typeof raw.cliWorkspace === 'string' ? raw.cliWorkspace.trim() : '',
+    cliPermissionMode: normalizePermissionMode(raw.cliPermissionMode),
+    cliConcurrency: clampPositiveInt(pick('cliConcurrency', DOUBAO_DEFAULTS.cliConcurrency), DOUBAO_DEFAULTS.cliConcurrency),
+    cliEffort: normalizeCliEffort(raw.cliEffort),
   }
+}
+
+/** CLI 推理强度收口：空 = 用模型默认；只认 CLI 支持的七档，其余回落空。 */
+export function normalizeCliEffort(value) {
+  const text = String(value ?? '').trim()
+  return ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(text) ? text : ''
+}
+
+/** 后端选择收口：只认 cli / http，其余（含空值、笔误）回落 auto。 */
+export function normalizeBackend(value) {
+  const text = String(value ?? '').trim().toLowerCase()
+  return text === 'cli' || text === 'http' ? text : 'auto'
+}
+
+/** CLI 权限模式收口：只认三档，其余回落 ask_risky。 */
+export function normalizePermissionMode(value) {
+  const text = String(value ?? '').trim()
+  return ['ask_always', 'ask_risky', 'always_allow'].includes(text) ? text : DOUBAO_DEFAULTS.cliPermissionMode
 }
 
 /** 主账号形状收口：非对象 → 空对象；字段逐个收口为合法类型。 */

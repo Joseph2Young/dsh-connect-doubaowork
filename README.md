@@ -2,24 +2,33 @@
 
 豆包「工作模式」版 DSH 连接插件——把豆包 Web 端工作模式（agent mode）聚合的模型接入 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)，在 DSH 里直接使用豆包、DeepSeek、Kimi、GLM 系列模型。
 
-插件在本机拉起一个 OpenAI 兼容的回环网关（127.0.0.1 随机端口 + 进程内随机 bearer token），DSH 宿主的模型请求走这个网关，由插件复刻豆包工作模式的请求体与 SSE 事件流，转发到豆包的聊天补全端点。
+插件在本机拉起一个 OpenAI 兼容的回环网关（127.0.0.1 随机端口 + 进程内随机 bearer token），DSH 宿主的模型请求走这个网关，再由插件转发到豆包。转发有两条后端路线，可在设置卡片切换：
+
+| 后端 | 登录态来源 | 特点 |
+| --- | --- | --- |
+| `cli` | 官方豆包 CLI（`doubao login` 扫码一次） | 复用官方 CLI 的长期登录态，不依赖桌面端 cookie；自带工具执行与本地文件能力；支持 CLI 独有的新模型 |
+| `http` | 桌面端 cookie（`sessionid`） | 零额外安装，但 cookie 约 30 天过期，且受风控影响 |
+
+`backend` 默认 `auto`：CLI 已安装且已登录时优先走 CLI，否则自动回落 HTTP。两条路线共用同一份模型目录与同一套 DSH provider 注册，切换后端不影响调用方。
 
 ## 工作原理
 
 ```
-DSH 宿主 ──pi-ai(openai-completions)──▶ 本地回环网关 (/v1/chat/completions)
-                                            │ 构造工作模式请求体 + 解析 SSE 事件流
-                                            ▼
-                              https://www.doubao.com/chat/completion
+                                    ┌── http 后端 ──▶ https://www.doubao.com/chat/completion
+DSH 宿主 ──pi-ai──▶ 本地回环网关 ──┤   （构造工作模式请求体 + 解析 SSE 事件流）
+                    /v1/chat/completions
+                                    └── cli 后端 ───▶ doubao -p … --output-format stream-json
+                                        （子进程 + 逐行 NDJSON 解析）
 ```
 
 | 文件 | 职责 |
 | --- | --- |
 | `index.js` | 插件入口：先启动网关，再动态装配宿主包并注册 provider |
-| `shim.js` | OpenAI 兼容网关（流式 SSE / 非流式 JSON），管理会话复用与超时 |
+| `shim.js` | OpenAI 兼容网关（流式 SSE / 非流式 JSON），管理会话复用与超时，按 `backend` 分发到两条后端 |
+| `cli-backend.js` | 豆包 CLI 子进程桥：NDJSON 事件解析、串行任务队列、探测与模型清单 |
 | `doubao-protocol.js` | 工作模式请求体构造与 SSE 事件泵（正文增量 / 思考标题 / 会话 ack / 收尾） |
 | `adapter.js` | `createProvider` + `openAICompletionsApi` + `PiAiAdapter` 装配 |
-| `catalog.js` | 模型目录（10 个，含别名） |
+| `catalog.js` | 模型目录（静态 10 个 + CLI 动态清单合并，含别名） |
 | `credentials.js` | 豆包登录态加载（手动导入 / 桌面端自动发现） |
 | `config.js` | 配置 schema 与默认常量 |
 | `plugin.js` | 宿主注册编排（adapter → 目录 → discovery，含失败回收） |
@@ -40,6 +49,8 @@ DSH 宿主 ──pi-ai(openai-completions)──▶ 本地回环网关 (/v1/chat
 | `glm-5.3-flash` | — | GLM 5.3 Flash |
 
 `enabledModelIds` 留空表示全部启用；填入的 ID 全部无法识别时回落为全部，避免出现空路由。
+
+上表是静态兜底目录。CLI 后端登录后会自动执行 `doubao model list --json` 拉取真实清单并与静态表合并：同名条目用 CLI 的显示名覆盖（保留静态表的上下文窗口等元信息），CLI 独有的新模型追加为 `cliOnly` 条目（只有 CLI 后端能路由，HTTP 后端没有对应的 `model_item_key`）。未登录或拉取失败时静默回落静态表，不会掉模型。
 
 ## 安装
 
@@ -62,9 +73,32 @@ pnpm add file:/绝对路径/dsh-connect-doubaowork
 
 > 注意：请用 `file:` 而不是 `link:`。本插件把 `@deepseek-ai/*`、`@earendil-works/pi-ai` 声明为 peerDependencies，`link:` 建立的软链不会从目标目录解析 peer 包，会导致宿主加载失败。
 
+## 豆包 CLI 后端（推荐）
+
+官方 CLI 提供单次任务模式与逐行 JSON 输出，插件把它当作一条与 HTTP 抓包并列的上游后端：
+
+```sh
+npm i -g @bytedance/doubao-cli   # 安装（postinstall 会下载平台原生包）
+doubao login                      # 扫码登录一次，登录态长期有效
+doubao model list                 # 可选：确认能列出模型
+```
+
+装好并登录后，插件在 `backend: "auto"`（默认）下会自动切到 CLI 后端——不需要改任何配置。也可以在设置卡片里显式选 `cli` 或 `http`。
+
+**它怎么工作**：每次 DSH 请求，插件拉起一次 `doubao -C <工作目录> -p <提示词> --output-format stream-json [--model <ID>] [--effort <档位>] [--resume <会话ID>]`，逐行解析 NDJSON 事件（`system.init` / `stream_event` 文本增量 / `assistant` 全量 / `result` 收尾）并转成 OpenAI SSE。多个请求通过内部队列串行化（CLI 是单账号共享后台，并发实例容易撞实例锁）。
+
+**会话复用**：首轮把 DSH 的历史消息压平成一段文本，同时记下 CLI 返回的 `session_id`；后续轮次用 `--resume <session_id>` 续接，只发最后一条 user 文本——所以豆包侧的上下文由 CLI 自己维护，不会每轮重建。
+`conversationMode: "single"` 下所有 DSH 会话共用一条 CLI 会话；`per-chat` 下每个 DSH 会话各自绑定一条。
+
+**边界**：
+- CLI 只支持 macOS ARM64 / Windows x64 / Linux x64；不支持的平台请用 `http` 后端或 `auto`（会自然回落）；
+- CLI 走自己的 passport 登录体系，**不复用**桌面端 cookie，所以两条路线各需各自的登录；
+- CLI 自带的工具执行/本地文件能力目前只记日志（不作为 OpenAI `tool_calls` 回给宿主），权限由 `cliPermissionMode` 控制；oneshot 模式下遇到需要审批的交互会被自动拒绝并继续，拒绝详情记录在日志里；
+- 首次消息上限 262144 字符（CLI 侧限制），超长历史需靠 `flattenHistory` 压缩。
+
 ## 凭据配置
 
-插件不做扫码或抓包，两种方式提供豆包登录态。
+HTTP 后端需要豆包登录态；如果只用 CLI 后端（`backend: "cli"`）可以跳过本节。插件不做扫码或抓包，两种方式提供登录态。
 
 ### 方式一（推荐）：手动导入 Cookie
 
@@ -110,10 +144,18 @@ pnpm add file:/绝对路径/dsh-connect-doubaowork
 | `account` | 空 | 主账号快捷配置（`cookie` / `deviceId` / `webId`），优先级低于凭据文件 |
 | `poolEnabled` | `false` | 账号池故障转移：当前账号上游失败时自动换下一个账号重试（多账号时生效） |
 | `keepaliveEnabled` | `false` | 每日保活巡检：定时检查各账号 Cookie 是否仍被豆包接受（见下文） |
+| `backend` | `"auto"` | 上游后端：`auto`（CLI 可用且已登录就优先 CLI）/ `cli`（只用 CLI）/ `http`（只用 HTTP 抓包） |
+| `cliPath` | `""` | `doubao` 可执行文件路径，空 = 自动探测 npm 全局 bin、`~/.local/bin`、Homebrew、`PATH` |
+| `cliWorkspace` | `""` | CLI 任务工作目录（`-C`），空 = 用户主目录 |
+| `cliPermissionMode` | `"ask_risky"` | CLI 权限模式：`ask_always` / `ask_risky` / `always_allow` |
+| `cliConcurrency` | `1` | CLI 并发任务上限（CLI 是单账号共享后台，建议保持 1） |
+| `cliEffort` | `""` | CLI 推理强度：`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`，空 = 模型默认 |
 
 ## 设置界面
 
-插件自带 DSH Web GUI 设置卡片（`dsh.client` 注入，无需构建）：在 **DSH 设置 → 插件 → 豆包工作模式** 中可读写网关选项（会话归属、工作模式、思考强度、超时等）、查看账号池健康状态、手动触发保活巡检。卡片对配置采用「草稿-保存」模式：改动先落在草稿，点「保存设置」才写回；健康状态为只读测量值（由巡检写入 `~/.dsh-doubao/pool-state.json`）。老版本宿主不提供设置插槽时，卡片自动降级或隐藏，不影响网关本体。
+插件自带 DSH Web GUI 设置卡片（`dsh.client` 注入，无需构建）：在 **DSH 设置 → 插件 → 豆包工作模式** 中可读写网关选项（会话归属、工作模式、思考强度、超时等）、查看账号池健康状态、手动触发保活巡检。卡片另有一块「上游后端 / 豆包 CLI」区域：可切换 `backend`、填写 `cliPath` 与工作目录、选择 CLI 权限模式与推理强度，并显示 CLI 的安装/登录状态与拉到的模型清单，提供「重新探测 CLI」按钮（`POST /plugins/dsh-connect-doubaowork/cli/refresh`）。
+
+卡片对配置采用「草稿-保存」模式：改动先落在草稿，点「保存设置」才写回；健康状态为只读测量值（由巡检写入 `~/.dsh-doubao/pool-state.json`）。老版本宿主不提供设置插槽时，卡片自动降级或隐藏，不影响网关本体。
 
 ## 账号池与保活巡检
 
@@ -161,12 +203,17 @@ pnpm add file:/绝对路径/dsh-connect-doubaowork
 - **回复被风控中断**：多为 Cookie 缺设备字段，改用手动导入的完整 Cookie。
 - **豆包回复以 `❓` 提问结尾**：这是工作模式的正常反问，在 DSH 里直接回答即可，回答会送回同一豆包会话继续执行（见上文「豆包反问如何回到 DSH」）。
 - **账号池没有切换**：确认 `poolEnabled: true` 且凭据文件里有多个有效账号（含 `sessionid=`）；流式响应已经开始后不会换号。
+- **`auto` 模式下怎么知道现在走的是哪条后端？** 宿主日志里启动那一行会写「后端：cli」或「后端：http」；设置卡片的「豆包 CLI」区域也会显示安装/登录状态。`backend: "cli"` 时即使 CLI 未登录也会尝试 CLI（错误信息原样透传，便于定位），不会静默回落。
+- **CLI 报 `login_required`？** 执行 `doubao login` 扫码一次。登录态保存在 `~/Library/Application Support/doubao_cli/doubao-cli-pc-login/`（macOS），与桌面端 cookie 无关。
+- **插件找不到 `doubao`？** 自动探测顺序是 npm 全局 bin → `~/.local/bin` → `/opt/homebrew/bin` → `/usr/local/bin` → `PATH`。都不命中时在配置里填 `cliPath` 绝对路径。
 
 ## 测试
 
 ```sh
 node --test "tests/*.test.js"
 ```
+
+97 个用例，覆盖协议解析、网关、账号池、保活巡检、CLI 后端（NDJSON 事件、串行队列、探测、超时/取消）、目录合并与设置卡片渲染。CLI 相关用例全部用假子进程（`EventEmitter` + `Readable`）驱动，不依赖本机是否装了豆包 CLI。
 
 纯 ESM JavaScript，零构建、零运行时依赖（仅 Node 内置模块 + 宿主 peer 包）。
 

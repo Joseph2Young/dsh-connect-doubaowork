@@ -8,6 +8,7 @@
  */
 export const PLUGIN_STATUS_PATH = '/plugins/dsh-connect-doubaowork/status'
 export const PLUGIN_KEEPALIVE_RUN_PATH = '/plugins/dsh-connect-doubaowork/keepalive/run'
+export const PLUGIN_CLI_REFRESH_PATH = '/plugins/dsh-connect-doubaowork/cli/refresh'
 
 function json(res, status, payload) {
   if (res.writableEnded || res.destroyed) return
@@ -24,7 +25,7 @@ function requireLoopback(req) {
 /**
  * 注册插件路由；返回卸载函数（未注册时返回 no-op）。
  * @param {object} ctx cordis 上下文
- * @param {object} deps { status(), runKeepalive() }
+ * @param {object} deps { status(), runKeepalive(), refreshCli?() }
  */
 export function registerPluginRoutes(ctx, deps) {
   const webServer = ctx?.get?.('webServer')
@@ -71,6 +72,29 @@ export function registerPluginRoutes(ctx, deps) {
       }
     },
   })
+
+  // CLI 状态刷新：设置卡片「重新探测 CLI」按钮用（会拉 --version / auth status 子进程）
+  if (typeof deps.refreshCli === 'function') {
+    route({
+      kind: 'exact',
+      path: PLUGIN_CLI_REFRESH_PATH,
+      handler: async (req, res) => {
+        if (req.method !== 'POST') {
+          json(res, 405, { error: 'method not allowed' })
+          return
+        }
+        if (!requireLoopback(req)) {
+          json(res, 403, { error: 'loopback only' })
+          return
+        }
+        try {
+          json(res, 200, await deps.refreshCli())
+        } catch (error) {
+          json(res, 500, { error: error?.message ?? String(error) })
+        }
+      },
+    })
+  }
 
   return () => {
     for (const dispose of disposers) {

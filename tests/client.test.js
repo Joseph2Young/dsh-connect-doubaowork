@@ -138,6 +138,11 @@ test('client bundle：卡片渲染核心分组（无 JSX，纯 createElement 树
   assert.match(flat, /豆包工作模式/)
   assert.match(flat, /账号池/)
   assert.match(flat, /每日保活巡检/)
+  // CLI 后端区块（0.3.0 新增）：后端选择 + CLI 状态 + 重新探测按钮
+  assert.match(flat, /上游后端/)
+  assert.match(flat, /豆包 CLI/)
+  assert.match(flat, /后端选择/)
+  assert.match(flat, /重新探测 CLI/)
 })
 
 test('声明 dsh.client 的包必须在 exports 暴露 ./client 且目标文件存在（宿主冷启动硬校验）', () => {

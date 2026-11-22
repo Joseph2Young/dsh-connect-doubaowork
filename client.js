@@ -24,6 +24,7 @@ window.__ModuleLoader__.load({
     const NS_CANDIDATES = ['dsh-connect-doubaowork']
     const STATUS_PATH = '/plugins/dsh-connect-doubaowork/status'
     const KEEPALIVE_RUN_PATH = '/plugins/dsh-connect-doubaowork/keepalive/run'
+    const CLI_REFRESH_PATH = '/plugins/dsh-connect-doubaowork/cli/refresh'
 
     const COPY = {
       zh: {
@@ -52,6 +53,30 @@ window.__ModuleLoader__.load({
         'accounts.lastRun': '上次巡检',
         'accounts.never': '从未巡检',
         'accounts.readonly': '（健康状态为只读测量值，由巡检写入 ~/.dsh-doubao/pool-state.json）',
+        'group.backend': '上游后端',
+        'field.backend': '后端选择',
+        'field.backend.auto': 'auto：装好 CLI 且已登录就优先 CLI，否则用 HTTP',
+        'field.backend.cli': 'cli：只用豆包 CLI（需先执行 doubao login）',
+        'field.backend.http': 'http：只用 HTTP 抓包（复用桌面端 cookie）',
+        'field.cliPath': 'doubao 路径（留空自动探测）',
+        'field.cliWorkspace': 'CLI 工作目录（留空用主目录）',
+        'field.cliPermissionMode': 'CLI 权限模式',
+        'field.cliPermissionMode.ask_risky': 'ask_risky（风险操作时确认，推荐）',
+        'field.cliPermissionMode.ask_always': 'ask_always（始终确认）',
+        'field.cliPermissionMode.always_allow': 'always_allow（全部允许）',
+        'field.cliEffort': 'CLI 推理强度（留空用模型默认）',
+        'field.cliEffort.default': '模型默认',
+        'group.cli': '豆包 CLI',
+        'cli.installed': '已安装',
+        'cli.notInstalled': '未检测到',
+        'cli.loggedIn': '已登录',
+        'cli.notLoggedIn': '未登录（请执行 doubao login 扫码）',
+        'cli.models': 'CLI 模型清单',
+        'cli.noModels': '未拉取（登录后自动拉取）',
+        'cli.unknown': '尚未探测',
+        'action.refreshCli': '重新探测 CLI',
+        'action.refreshing': '探测中…',
+        'hint.cli': 'CLI 后端走豆包官方 CLI 的登录态（doubao login 扫码一次），不依赖桌面端 cookie；它还自带工具执行与本地文件能力。HTTP 后端复用桌面端 cookie，约 30 天过期。',
         'group.hint': '说明',
         'hint.keepalive': '豆包没有「签到」概念，保活巡检为等价功能：每日定时验证各账号 cookie 是否仍被豆包接受。纯读操作，不产生会话记录。',
         'hint.saveUnsaved': '有未保存的修改',
@@ -83,6 +108,30 @@ window.__ModuleLoader__.load({
         'accounts.lastRun': 'Last probe',
         'accounts.never': 'never',
         'accounts.readonly': ' (health is a read-only measurement written to ~/.dsh-doubao/pool-state.json)',
+        'group.backend': 'Upstream backend',
+        'field.backend': 'Backend',
+        'field.backend.auto': 'auto: prefer CLI when installed and signed in, else HTTP',
+        'field.backend.cli': 'cli: Doubao CLI only (run doubao login first)',
+        'field.backend.http': 'http: HTTP capture only (desktop cookie)',
+        'field.cliPath': 'doubao path (empty = autodetect)',
+        'field.cliWorkspace': 'CLI workspace (empty = home)',
+        'field.cliPermissionMode': 'CLI permission mode',
+        'field.cliPermissionMode.ask_risky': 'ask_risky (confirm risky ops, recommended)',
+        'field.cliPermissionMode.ask_always': 'ask_always (always confirm)',
+        'field.cliPermissionMode.always_allow': 'always_allow (allow everything)',
+        'field.cliEffort': 'CLI reasoning effort (empty = model default)',
+        'field.cliEffort.default': 'model default',
+        'group.cli': 'Doubao CLI',
+        'cli.installed': 'installed',
+        'cli.notInstalled': 'not found',
+        'cli.loggedIn': 'signed in',
+        'cli.notLoggedIn': 'not signed in (run doubao login)',
+        'cli.models': 'CLI model list',
+        'cli.noModels': 'not fetched (fetched automatically after sign-in)',
+        'cli.unknown': 'not probed yet',
+        'action.refreshCli': 'Probe CLI again',
+        'action.refreshing': 'Probing…',
+        'hint.cli': 'The CLI backend uses the official Doubao CLI login (scan a QR code once with doubao login) and does not depend on the desktop cookie; it also brings tool execution and local file access. The HTTP backend reuses the desktop cookie, which expires in about 30 days.',
         'group.hint': 'Notes',
         'hint.keepalive': 'Doubao has no check-in concept; the keepalive probe is the equivalent: a daily read-only check that each account cookie is still accepted. It creates no Doubao conversations.',
         'hint.saveUnsaved': 'Unsaved changes',
@@ -100,6 +149,7 @@ window.__ModuleLoader__.load({
       const [status, setStatus] = react.useState(null)
       const [statusError, setStatusError] = react.useState(false)
       const [probing, setProbing] = react.useState(false)
+      const [refreshing, setRefreshing] = react.useState(false)
 
       const value = draft ?? config
       const dirty = draft !== null
@@ -117,7 +167,10 @@ window.__ModuleLoader__.load({
 
       const save = () => {
         if (draft === null || typeof settingsScope?.set !== 'function') return
-        for (const key of ['conversationMode', 'workMode', 'flattenHistory', 'reasoningEffort', 'timeoutSeconds', 'poolEnabled', 'keepaliveEnabled']) {
+        for (const key of [
+          'backend', 'conversationMode', 'workMode', 'flattenHistory', 'reasoningEffort', 'timeoutSeconds',
+          'poolEnabled', 'keepaliveEnabled', 'cliPath', 'cliWorkspace', 'cliPermissionMode', 'cliEffort',
+        ]) {
           if (draft[key] !== undefined && draft[key] !== config[key]) {
             try {
               settingsScope.set(key, draft[key])
@@ -140,6 +193,20 @@ window.__ModuleLoader__.load({
           }
         } catch {} finally {
           setProbing(false)
+        }
+      }
+
+      const refreshCli = async () => {
+        setRefreshing(true)
+        try {
+          const response = await fetch(CLI_REFRESH_PATH, { method: 'POST', headers: { accept: 'application/json' } })
+          if (response.ok) {
+            const data = await response.json()
+            setStatus(current => ({ ...(current ?? {}), cli: data }))
+            setStatusError(false)
+          }
+        } catch {} finally {
+          setRefreshing(false)
         }
       }
 
@@ -211,6 +278,87 @@ window.__ModuleLoader__.load({
         rows.push(h('div', { key: 'ro', style: { opacity: 0.7, fontSize: '0.88em' } }, t('accounts.readonly')))
       }
 
+      // —— 上游后端选择 + CLI 状态 ——
+      rows.push(h('div', { key: 'gb', style: sectionTitle }, t('group.backend')))
+      if (settingsScope !== undefined) {
+        rows.push(h('div', { key: 'b1', style: rowStyle },
+          h('label', { style: labelStyle }, t('field.backend')),
+          h('select', {
+            style: inputStyle,
+            value: value.backend ?? 'auto',
+            onChange: event => setField('backend', event.target.value),
+          },
+          h('option', { value: 'auto' }, t('field.backend.auto')),
+          h('option', { value: 'cli' }, t('field.backend.cli')),
+          h('option', { value: 'http' }, t('field.backend.http')))),
+        )
+        rows.push(h('div', { key: 'b2', style: rowStyle },
+          h('label', { style: labelStyle }, t('field.cliPath')),
+          h('input', {
+            style: inputStyle, type: 'text', placeholder: 'doubao',
+            value: value.cliPath ?? '',
+            onChange: event => setField('cliPath', event.target.value),
+          })),
+        )
+        rows.push(h('div', { key: 'b3', style: rowStyle },
+          h('label', { style: labelStyle }, t('field.cliWorkspace')),
+          h('input', {
+            style: inputStyle, type: 'text', placeholder: '~',
+            value: value.cliWorkspace ?? '',
+            onChange: event => setField('cliWorkspace', event.target.value),
+          })),
+        )
+        rows.push(h('div', { key: 'b4', style: rowStyle },
+          h('label', { style: labelStyle }, t('field.cliPermissionMode')),
+          h('select', {
+            style: inputStyle,
+            value: value.cliPermissionMode ?? 'ask_risky',
+            onChange: event => setField('cliPermissionMode', event.target.value),
+          },
+          h('option', { value: 'ask_risky' }, t('field.cliPermissionMode.ask_risky')),
+          h('option', { value: 'ask_always' }, t('field.cliPermissionMode.ask_always')),
+          h('option', { value: 'always_allow' }, t('field.cliPermissionMode.always_allow')))),
+        )
+        rows.push(h('div', { key: 'b5', style: rowStyle },
+          h('label', { style: labelStyle }, t('field.cliEffort')),
+          h('select', {
+            style: inputStyle,
+            value: value.cliEffort ?? '',
+            onChange: event => setField('cliEffort', event.target.value),
+          },
+          [['', t('field.cliEffort.default')], ['none', 'none'], ['minimal', 'minimal'], ['low', 'low'],
+            ['medium', 'medium'], ['high', 'high'], ['xhigh', 'xhigh'], ['max', 'max']]
+            .map(([level, label]) => h('option', { key: level === '' ? 'default' : level, value: level }, label)))),
+        )
+      }
+
+      // —— CLI 探测状态（只读测量值 + 手动重新探测）——
+      rows.push(h('div', { key: 'gc', style: sectionTitle }, t('group.cli')))
+      const cli = status?.cli
+      if (cli === null || cli === undefined) {
+        rows.push(h('div', { key: 'cliu', style: { opacity: 0.7, fontSize: '0.88em' } }, statusError ? t('error.fetch') : t('cli.unknown')))
+      } else {
+        rows.push(h('div', { key: 'clii', style: rowStyle },
+          h('span', null, t('cli.installed')),
+          h('span', { style: { fontSize: '0.85em', opacity: 0.85 } },
+            cli.installed === true ? `✓ ${cli.version === '' ? '' : `v${cli.version}`}`.trim() : t('cli.notInstalled')),
+        ))
+        rows.push(h('div', { key: 'clil', style: rowStyle },
+          h('span', null, t('cli.loggedIn')),
+          h('span', { style: { fontSize: '0.85em', opacity: 0.85 } },
+            cli.loggedIn === true ? `✓ ${t('cli.loggedIn')}` : t('cli.notLoggedIn')),
+        ))
+        const cliModels = Array.isArray(cli.models) ? cli.models : []
+        rows.push(h('div', { key: 'clim', style: rowStyle },
+          h('span', null, t('cli.models')),
+          h('span', { style: { fontSize: '0.85em', opacity: 0.85 } },
+            cliModels.length === 0 ? t('cli.noModels') : `${cliModels.length}：${cliModels.join(', ')}`),
+        ))
+      }
+      rows.push(h('div', { key: 'clirefresh', style: rowStyle },
+        h('button', { type: 'button', disabled: refreshing, onClick: refreshCli }, refreshing ? t('action.refreshing') : t('action.refreshCli')))
+      )
+
       // —— 账号池健康（只读测量值 + 手动巡检）——
       rows.push(h('div', { key: 'g2', style: sectionTitle }, t('group.accounts')))
       const list = Array.isArray(status?.accounts) ? status.accounts : []
@@ -237,6 +385,7 @@ window.__ModuleLoader__.load({
 
       // —— 说明 ——
       rows.push(h('div', { key: 'g3', style: sectionTitle }, t('group.hint')))
+      rows.push(h('div', { key: 'hintcli', style: { opacity: 0.7, fontSize: '0.85em', lineHeight: 1.5, marginBottom: 6 } }, t('hint.cli')))
       rows.push(h('div', { key: 'hint', style: { opacity: 0.7, fontSize: '0.85em', lineHeight: 1.5 } }, t('hint.keepalive')))
 
       return h('div', { className: 'dsm-doubaowork-card' }, rows)

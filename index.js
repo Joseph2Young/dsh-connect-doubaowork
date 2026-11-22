@@ -7,12 +7,13 @@
  */
 import z from '@deepseek-ai/schemastery'
 import { createConfigSchema, normalizeConfig, DOUBAO_DEFAULTS, DOUBAO_QUERY, DOUBAO_SETTINGS_NS } from './config.js'
-import { DOUBAO_PROVIDER, DOUBAO_PROVIDER_DISPLAY_NAME, DOUBAO_DEFAULT_MODEL, deriveCatalog, resolveModel } from './catalog.js'
+import { DOUBAO_PROVIDER, DOUBAO_PROVIDER_DISPLAY_NAME, DOUBAO_DEFAULT_MODEL, deriveCatalog, resolveModel, mergeCliModels } from './catalog.js'
 import { loadAccountList } from './credentials.js'
 import { buildRequestBody, pumpSse } from './doubao-protocol.js'
 import { createDoubaoShim } from './shim.js'
 import { createDoubaoAdapter } from './adapter.js'
 import { createKeepalive } from './keepalive.js'
+import { createCliClient, fetchCliModels, probeCli } from './cli-backend.js'
 import { registerPluginRoutes } from './routes.js'
 import { bootstrap } from './plugin.js'
 
@@ -31,13 +32,47 @@ export function apply(ctx, config) {
 
   // 目录每次现读活配置；normalizeConfig 是 apply 期快照，volatile 变更随重挂生效
   const enabledIds = () => (Array.isArray(config?.enabledModelIds) ? config.enabledModelIds.map(String) : normalized.enabledModelIds)
-  const models = () => deriveCatalog(enabledIds())
+  // CLI 动态清单：登录后拉一次并缓存；拉取失败/未登录时回落静态表（catalog.js）
+  let cliModels = []
+  const models = () => deriveCatalog(enabledIds(), mergeCliModels(cliModels))
   // 账号池装配：插件配置主账号 → 凭据文件（数组或旧单账号）→ 自动发现
   const accounts = () => loadAccountList({
     account: config?.account ?? normalized.account,
     credentialsFile: typeof config?.credentialsFile === 'string' ? config.credentialsFile : normalized.credentialsFile,
     autoDiscover: config?.autoDiscoverCredentials !== false,
   })
+
+  // CLI 状态快照：probeCli 是异步的，shim 侧需要同步判断，故用可变快照
+  const cliPath = () => (typeof config?.cliPath === 'string' ? config.cliPath.trim() : normalized.cliPath)
+  const cliState = { available: false, version: '', loggedIn: false, message: '尚未探测' }
+  const cliClient = createCliClient({
+    cliPath: cliPath(),
+    workspace: typeof config?.cliWorkspace === 'string' ? config.cliWorkspace.trim() : normalized.cliWorkspace,
+    permissionMode: normalized.cliPermissionMode,
+    timeoutSeconds: normalized.timeoutSeconds,
+    concurrency: normalized.cliConcurrency,
+    log,
+  })
+  const refreshCli = async () => {
+    const found = await probeCli({ cliPath: cliPath() })
+    // backend=cli 时不看登录态也让 shim 走 CLI：错误信息由 CLI 自己透传，
+    // 好过静默回落 HTTP 让用户以为在用 CLI
+    const forced = (normalized.backend === 'cli')
+    cliState.available = found.installed && (found.loggedIn || forced)
+    cliState.version = found.version
+    cliState.loggedIn = found.loggedIn
+    cliState.message = found.message
+    if (found.installed && found.loggedIn) {
+      const listing = await fetchCliModels({ cliPath: cliPath() })
+      cliModels = listing.models
+      if (listing.error !== '' && listing.models.length === 0) log('warn', `豆包 CLI 模型清单拉取失败：${listing.error}`)
+      else if (cliModels.length > 0) log('info', `豆包 CLI 模型清单：${cliModels.map(m => m.id).join(', ')}`)
+    } else {
+      cliModels = []
+    }
+    log('info', `豆包 CLI 状态：${found.installed ? (found.loggedIn ? '已安装且已登录' : '已安装未登录（需执行 doubao login）') : '未安装'}${found.version === '' ? '' : ` v${found.version}`}`)
+    return { ...cliState, models: cliModels }
+  }
 
   const shim = createDoubaoShim({
     catalog: models,
@@ -58,8 +93,15 @@ export function apply(ctx, config) {
       workMode: normalized.workMode,
       conversationMode: normalized.conversationMode,
       poolEnabled: normalized.poolEnabled,
+      backend: normalized.backend,
+      conversationMode: normalized.conversationMode,
     },
     log,
+    // CLI 后端：available() 是同步快照，run() 才真正拉子进程
+    cli: {
+      available: () => cliState.available,
+      run: task => cliClient.run(task),
+    },
   })
 
   // 每日保活巡检：opt-in（配置开关），手动按钮与定时器共用同一个巡检器
@@ -86,8 +128,11 @@ export function apply(ctx, config) {
       poolEnabled: normalized.poolEnabled,
       keepaliveEnabled: normalized.keepaliveEnabled,
       lastRun: keepalive.readState().lastRun ?? null,
+      backend: normalized.backend,
+      cli: { ...cliState, models: cliModels.map(model => model.id) },
     }),
     runKeepalive: () => keepalive.runNow('manual'),
+    refreshCli: () => refreshCli(),
   })
   ctx.effect(() => () => {
     disposeRoutes?.()
@@ -131,7 +176,17 @@ export function apply(ctx, config) {
         adapter,
         models,
       })
-      log('info', `豆包工作模式网关已就绪：${shim.baseUrl()}（模型：${models().map(m => m.id).join(', ')}）`)
+      const backend = normalized.backend === 'http'
+        ? 'http'
+        : cliState.available ? 'cli' : 'http'
+      log('info', `豆包工作模式网关已就绪：${shim.baseUrl()}（后端：${backend}；模型：${models().map(m => m.id).join(', ')}）`)
+      // CLI 探测放到注册之后：探测要拉两次子进程（--version/auth status），
+      // 不该阻塞 provider 上线；探测完成后目录会自然热更新（getModels 是 live 的）
+      void refreshCli().then(state => {
+        if (!stopped && state.models.length > 0) adapter.invalidate()
+      }).catch(error => {
+        if (!stopped) log('warn', `豆包 CLI 探测失败（不影响 HTTP 后端）：${error?.message ?? error}`)
+      })
     })
     .catch(error => {
       if (!stopped) log('error', 'loopback endpoint failed to start; providers not registered', error)
