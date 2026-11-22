@@ -65,11 +65,67 @@ function requireLoopback(req) {
  * @param {object} deps { status(), runKeepalive(), refreshCli?() }
  */
 export function registerPluginRoutes(ctx, deps) {
-  const webServer = ctx?.get?.('webServer')
-  if (!webServer || typeof webServer.register !== 'function') return () => {}
-  const disposers = []
-  const route = (entry) => disposers.push(webServer.register(entry))
+  /**
+   * 用 `ctx.inject(['webServer'], …)` 响应式挂载，而不是一次性 `ctx.get()`。
+   *
+   * 宿主启动顺序不保证插件 activate 时 `webServer` 已就绪：早期实现用
+   * `ctx.get('webServer')` 同步探测，拿到 undefined 就整个跳过注册——结果是
+   * 设置卡片所有区块都显示「状态读取失败（主进程路由不可用）」，而日志里没有
+   * 任何报错（因为走的是「静默降级」这条设计路径）。cordis 的 inject 会在服务
+   * 上线时回调、下线时执行清理函数，启动顺序就不再有影响。
+   */
+  if (typeof ctx?.inject !== 'function' && typeof ctx?.get !== 'function') return () => {}
+  // 插件已被卸载后，晚到的挂载必须立刻自我注销，否则会留下一批没人负责的路由。
+  // （只对「卸载早于 webServer 上线」这种时序有意义，但不加就必然是泄漏。）
+  let disposed = false
+  let outerDisposer = null
 
+  const mount = (webCtx) => {
+    const webServer = webCtx?.webServer ?? webCtx?.get?.('webServer')
+    if (!webServer || typeof webServer.register !== 'function') return () => {}
+    const disposers = []
+    const route = (entry) => disposers.push(webServer.register(entry))
+    registerAll(route, deps)
+    return () => {
+      for (const dispose of disposers) {
+        try {
+          dispose?.()
+        } catch {}
+      }
+      disposers.length = 0
+    }
+  }
+
+  if (typeof ctx?.inject === 'function') {
+    ctx.inject(['webServer'], (webCtx) => {
+      const dispose = mount(webCtx)
+      if (disposed) dispose()
+      else outerDisposer = dispose
+    })
+    return () => {
+      disposed = true
+      try {
+        outerDisposer?.()
+      } catch {}
+      outerDisposer = null
+    }
+  }
+
+  // 兜底：老宿主没有 inject，退回同步探测（行为与旧版一致）
+  const syncDisposer = mount(ctx)
+  return () => {
+    disposed = true
+    try {
+      syncDisposer?.()
+    } catch {}
+  }
+}
+
+/**
+ * 把全部插件路由登记到给定的 `route(entry)` 上。
+ * 抽成独立函数，是为了让「响应式挂载」与「同步兜底」共用同一份路由清单。
+ */
+function registerAll(route, deps) {
   route({
     kind: 'exact',
     path: PLUGIN_STATUS_PATH,
@@ -194,11 +250,4 @@ export function registerPluginRoutes(ctx, deps) {
     loginRoute(PLUGIN_LOGIN_CANCEL_PATH, () => deps.login.cancel())
   }
 
-  return () => {
-    for (const dispose of disposers) {
-      try {
-        dispose?.()
-      } catch {}
-    }
-  }
 }

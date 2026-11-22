@@ -265,6 +265,9 @@ HTTP 后端需要豆包登录态；如果只用 CLI 后端（`backend: "cli"`）
 - **`auto` 模式下怎么知道现在走的是哪条后端？** 宿主日志里启动那一行会写「后端：cli」或「后端：http」；设置卡片的「豆包 CLI」区域也会显示安装/登录状态。`backend: "cli"` 时即使 CLI 未登录也会尝试 CLI（错误信息原样透传，便于定位），不会静默回落。
 - **CLI 报 `login_required`？** 执行 `doubao login` 扫码一次。登录态保存在 `~/Library/Application Support/doubao_cli/doubao-cli-pc-login/`（macOS），与桌面端 cookie 无关。
 - **插件找不到 `doubao`？** 自动探测顺序是 npm 全局 bin → `~/.local/bin` → `/opt/homebrew/bin` → `/usr/local/bin` → `PATH`。都不命中时在配置里填 `cliPath` 绝对路径。
+- **卡片上所有区块都显示「状态读取失败（主进程路由不可用）」？**
+
+插件自己的 HTTP 路由没挂上。0.4.0 及更早版本用 `ctx.get('webServer')` 做一次性同步探测：宿主启动时 `webServer` 服务若还没就绪，插件会拿到 `undefined` 并静默跳过注册——日志里那条「网关已就绪」照常打，所以从日志看不出问题。0.4.1 起改用 `ctx.inject(['webServer'], …)` 响应式挂载，启动顺序不再影响注册。升级后重启 DSH 即可。
 
 ## 隐私与数据流向
 
@@ -304,12 +307,12 @@ HTTP 后端需要豆包登录态；如果只用 CLI 后端（`backend: "cli"`）
 node --test "tests/*.test.js"
 ```
 
-148 个用例，覆盖协议解析、网关、账号池、保活巡检、CLI 后端（NDJSON 事件、串行队列、探测、超时/取消）、扫码登录、插件路由、目录合并与设置卡片渲染。
+152 个用例，覆盖协议解析、网关、账号池、保活巡检、CLI 后端（NDJSON 事件、串行队列、探测、超时/取消）、扫码登录、插件路由、目录合并与设置卡片渲染。
 
 - CLI 与登录相关用例全部用假子进程（`EventEmitter` + `Readable`）驱动，不依赖本机是否装了豆包 CLI；
 - `tests/onboarding.test.js`（14 例）覆盖首次引导的三态与隐私回归；
 - `tests/login.test.js`（18 例）覆盖二维码解析、conflict/不可用/未安装三种失败、文件晚落盘重试、单实例复用、过期与取消、**伪造 PNG 不被当图片回传**；
-- `tests/routes.test.js`（11 例）覆盖方法闸、loopback 闸、能力缺席不注册、poll 读 body、卸载回收；
+- `tests/routes.test.js`（15 例）覆盖方法闸、loopback 闸、能力缺席不注册、poll 读 body、卸载回收，以及**启动顺序回归**（webServer 晚于插件就绪、插件先卸载而挂载晚到）；
 - `tests/client.test.js` 用带 hooks 槽位的假 react 真正驱动卡片重渲染（含引导区块与登录区块）。
 
 纯 ESM JavaScript，零构建、零运行时依赖（仅 Node 内置模块 + 宿主 peer 包）。

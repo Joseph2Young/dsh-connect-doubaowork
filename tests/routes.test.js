@@ -17,7 +17,7 @@ import {
  * 重点是闸门语义（方法 / loopback）和「能力缺席时不注册」。
  */
 
-function makeFakeCtx({ withWebServer = true } = {}) {
+function makeFakeCtx({ withWebServer = true, withInject = true } = {}) {
   const routes = []
   const webServer = {
     register: entry => {
@@ -26,11 +26,27 @@ function makeFakeCtx({ withWebServer = true } = {}) {
       return () => { disposed = true; entry.disposed = disposed }
     },
   }
+  // inject 回调的调用时机由测试掌握：真实宿主里它在 webServer 上线时才触发，
+  // 这里通过 `deliver()` 模拟「晚到」，用来断言启动顺序不再影响注册。
+  const pending = []
+  const ctx = {
+    get: name => (name === 'webServer' && withWebServer ? webServer : undefined),
+  }
+  if (withInject) {
+    ctx.inject = (names, callback) => {
+      pending.push({ names, callback })
+      // 立即投递一次（模拟 webServer 已就绪的常规情形）
+      if (withWebServer) callback({ webServer, get: ctx.get })
+    }
+  }
   return {
     routes,
-    ctx: {
-      get: name => (name === 'webServer' && withWebServer ? webServer : undefined),
+    webServer,
+    /** 之后再触发一次 inject 回调（测试「挂载晚到」路径时用）。 */
+    deliver: () => {
+      for (const item of pending.splice(0)) item.callback({ webServer, get: ctx.get })
     },
+    ctx,
   }
 }
 
@@ -71,6 +87,17 @@ function makeReq({ method = 'GET', remote = '127.0.0.1', body } = {}) {
 }
 
 const findRoute = (routes, path) => routes.find(entry => entry.path === path)
+
+/** 最小可用的 deps：把四个能力都给上，便于断言「全都注册了」。 */
+const makeDeps = () => ({
+  status: () => ({ ok: 1 }),
+  runKeepalive: async () => ({ ok: true }),
+  refreshCli: async () => ({ available: false }),
+  refreshSetup: async () => ({ ready: false }),
+  login: { start: async () => ({ ok: true }), poll: async () => ({ done: false }), cancel: () => ({ ok: true }) },
+})
+/** inject 回调收到的第二个参数在这里没用到，只是让 deliver 有实参。 */
+const needWebServer = undefined
 
 test('routes：webServer 缺席时静默降级为 no-op', () => {
   const { ctx } = makeFakeCtx({ withWebServer: false })
@@ -241,4 +268,59 @@ test('routes：卸载函数把注册的每条路由都 dispose 掉', () => {
   assert.ok(routes.length >= 4)
   dispose()
   assert.ok(routes.every(entry => entry.disposed === true), '所有路由都应被卸载')
+})
+
+// ── 启动顺序回归：这是 0.4.1 修的真实缺陷 ──────────────────────────────
+// 现场：插件 activate 时 webServer 还没就绪，早期实现用 ctx.get('webServer')
+// 同步探测拿到 undefined 就整个跳过注册 → 设置卡片所有区块显示
+// 「状态读取失败（主进程路由不可用）」，而日志里一条报错都没有。
+
+test('routes：webServer 晚于插件就绪时才上线，仍能挂上全部路由（启动顺序回归）', () => {
+  const { routes, ctx, deliver } = makeFakeCtx({ withWebServer: false })
+  const dispose = registerPluginRoutes(ctx, makeDeps())
+  assert.equal(routes.length, 0, 'webServer 未就绪时不该有路由')
+  // 模拟宿主稍后让 webServer 上线，cordis inject 回调此刻才触发
+  deliver(needWebServer)
+  assert.ok(routes.length >= 5, `webServer 上线后应挂上路由，实际 ${routes.length}`)
+  dispose()
+})
+
+test('routes：有 ctx.inject 时优先走响应式挂载，不做一次性同步探测', () => {
+  let injectCalls = 0
+  const routes = []
+  const webServer = {
+    register: entry => {
+      routes.push(entry)
+      return () => {}
+    },
+  }
+  const ctx = {
+    get: () => { throw new Error('有 inject 时不该调用 ctx.get') },
+    inject: (names, callback) => {
+      injectCalls += 1
+      assert.deepEqual(names, ['webServer'])
+      callback({ webServer })
+    },
+  }
+  const dispose = registerPluginRoutes(ctx, makeDeps())
+  assert.equal(injectCalls, 1, 'inject 应被调用一次')
+  assert.ok(routes.length >= 5)
+  dispose()
+})
+
+test('routes：卸载时既注销 webServer 上的路由，也注销 inject 的挂载', () => {
+  const { routes, ctx } = makeFakeCtx()
+  const dispose = registerPluginRoutes(ctx, makeDeps())
+  assert.ok(routes.length >= 5)
+  dispose()
+  assert.ok(routes.every(entry => entry.disposed === true), '每条路由都应被 dispose')
+})
+
+test('routes：插件先卸载、webServer 后上线时，晚到的挂载会自我注销（不泄漏）', () => {
+  const { routes, ctx, deliver } = makeFakeCtx({ withWebServer: false })
+  const dispose = registerPluginRoutes(ctx, makeDeps())
+  dispose() // 卸载发生在 webServer 上线之前
+  deliver() // webServer 此刻才上线，inject 回调晚到
+  assert.ok(routes.length > 0, '回调确实投递了')
+  assert.ok(routes.every(entry => entry.disposed === true), '晚到注册的路由必须立刻被注销')
 })
