@@ -341,3 +341,34 @@ test('CLI 后端：backend=cli 但未装配 cli 桥 → 503 明确提示，不�
     await shim.close()
   }
 })
+
+test('CLI 后端：宿主 tools 只记一次提示，不重复刷日志', async () => {
+  const logs = []
+  const cli = makeFakeCli({ script: [{ kind: 'delta', text: 'ok' }, { kind: 'ok' }] })
+  const base = deriveCatalog([])
+  const shim = createDoubaoShim({
+    catalog: () => base,
+    resolveModel: (id, list) => resolveModel(id, list ?? base),
+    accounts: () => [],
+    buildBody: buildRequestBody,
+    pump: pumpSse,
+    log: (level, message) => logs.push(`${level}:${message}`),
+    cli,
+    defaults: {
+      ...DOUBAO_DEFAULTS, query: DOUBAO_QUERY, defaultModel: DOUBAO_DEFAULT_MODEL,
+      chatUrl: 'http://127.0.0.1:1/never', timeoutSeconds: 5, heartbeatSeconds: 0, backend: 'cli',
+    },
+  })
+  await shim.start()
+  try {
+    const tool = { type: 'function', function: { name: 'read_file', description: 'x', parameters: {} } }
+    for (let i = 0; i < 3; i += 1) {
+      const response = await chat(shim, { model: DOUBAO_DEFAULT_MODEL, messages: [{ role: 'user', content: `第 ${i} 轮` }], tools: [tool], stream: false })
+      await response.text()
+    }
+    const notes = logs.filter(line => line.includes('不转发宿主 tools'))
+    assert.equal(notes.length, 1, `应只提示一次，实际 ${notes.length} 次`)
+  } finally {
+    await shim.close()
+  }
+})

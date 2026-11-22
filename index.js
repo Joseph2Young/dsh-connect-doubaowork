@@ -44,7 +44,10 @@ export function apply(ctx, config) {
 
   // CLI 状态快照：probeCli 是异步的，shim 侧需要同步判断，故用可变快照
   const cliPath = () => (typeof config?.cliPath === 'string' ? config.cliPath.trim() : normalized.cliPath)
-  const cliState = { available: false, version: '', loggedIn: false, message: '尚未探测' }
+  // CLI 探测状态：安装态/登录态/版本，供设置卡片与启动日志展示
+  // installed 与 available 分开：未登录时 installed 仍为 true，供卡片如实展示；
+  // available 还要求（已登录 或 用户显式选了 backend='cli'）
+  const cliState = { available: false, installed: false, version: '', loggedIn: false, message: '尚未探测' }
   const cliClient = createCliClient({
     cliPath: cliPath(),
     workspace: typeof config?.cliWorkspace === 'string' ? config.cliWorkspace.trim() : normalized.cliWorkspace,
@@ -58,6 +61,7 @@ export function apply(ctx, config) {
     // backend=cli 时不看登录态也让 shim 走 CLI：错误信息由 CLI 自己透传，
     // 好过静默回落 HTTP 让用户以为在用 CLI
     const forced = (normalized.backend === 'cli')
+    cliState.installed = found.installed
     cliState.available = found.installed && (found.loggedIn || forced)
     cliState.version = found.version
     cliState.loggedIn = found.loggedIn
