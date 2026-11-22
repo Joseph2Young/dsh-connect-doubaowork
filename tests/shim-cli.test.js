@@ -328,3 +328,16 @@ test('CLI 后端：auto 模型不传 --model（交给 CLI 默认）', async () =
     await shim.close()
   }
 })
+
+test('CLI 后端：backend=cli 但未装配 cli 桥 → 503 明确提示，不抛内部异常', async () => {
+  const shim = makeShim({ cli: null, backend: 'cli' })
+  await shim.start()
+  try {
+    const response = await chat(shim, { model: DOUBAO_DEFAULT_MODEL, messages: [{ role: 'user', content: '你好' }], stream: true })
+    const text = await response.text()
+    assert.match(text, /未装配 CLI 桥/)
+    assert.doesNotMatch(text, /Cannot read properties/)
+  } finally {
+    await shim.close()
+  }
+})

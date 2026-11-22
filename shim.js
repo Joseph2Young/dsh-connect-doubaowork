@@ -258,6 +258,12 @@ export function createDoubaoShim(options) {
    *   - CLI 自带工具执行/文件能力，工具事件只记日志，不冒充 OpenAI delta。
    */
   async function handleCliChat(res, { payload, messages, entry, convKey, previous, isStream }) {
+    // 显式 backend=cli 但装配没给 CLI 桥：报清楚原因，别把内部 TypeError 抛给用户
+    if (cli === null || typeof cli.run !== 'function') {
+      fail(res, 503, '已选择 CLI 后端，但插件未装配 CLI 桥；请把 backend 改回 auto 或 http（或重载插件）')
+      return
+    }
+
     // 会话归属：single 模式下 convKey 已是固定键，per-chat 模式下每键各一条，
     // 两种情况都从同一个 conversations 表取绑定会话
     const boundSession = previous?.conversationId ?? ''
