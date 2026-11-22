@@ -7,6 +7,7 @@
  * 只读配置，不影响主功能）。
  */
 export const PLUGIN_STATUS_PATH = '/plugins/dsh-connect-doubaowork/status'
+export const PLUGIN_SETUP_PATH = '/plugins/dsh-connect-doubaowork/setup'
 export const PLUGIN_KEEPALIVE_RUN_PATH = '/plugins/dsh-connect-doubaowork/keepalive/run'
 export const PLUGIN_CLI_REFRESH_PATH = '/plugins/dsh-connect-doubaowork/cli/refresh'
 
@@ -89,6 +90,29 @@ export function registerPluginRoutes(ctx, deps) {
         }
         try {
           json(res, 200, await deps.refreshCli())
+        } catch (error) {
+          json(res, 500, { error: error?.message ?? String(error) })
+        }
+      },
+    })
+  }
+
+  // 首次使用引导重新检查：设置卡片「重新检查」按钮用（只读探测，不改任何配置）
+  if (typeof deps.refreshSetup === 'function') {
+    route({
+      kind: 'exact',
+      path: PLUGIN_SETUP_PATH,
+      handler: async (req, res) => {
+        if (req.method !== 'POST') {
+          json(res, 405, { error: 'method not allowed' })
+          return
+        }
+        if (!requireLoopback(req)) {
+          json(res, 403, { error: 'loopback only' })
+          return
+        }
+        try {
+          json(res, 200, await deps.refreshSetup())
         } catch (error) {
           json(res, 500, { error: error?.message ?? String(error) })
         }

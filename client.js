@@ -25,6 +25,7 @@ window.__ModuleLoader__.load({
     const STATUS_PATH = '/plugins/dsh-connect-doubaowork/status'
     const KEEPALIVE_RUN_PATH = '/plugins/dsh-connect-doubaowork/keepalive/run'
     const CLI_REFRESH_PATH = '/plugins/dsh-connect-doubaowork/cli/refresh'
+    const SETUP_PATH = '/plugins/dsh-connect-doubaowork/setup'
 
     const COPY = {
       zh: {
@@ -76,6 +77,14 @@ window.__ModuleLoader__.load({
         'cli.unknown': '尚未探测',
         'action.refreshCli': '重新探测 CLI',
         'action.refreshing': '探测中…',
+        'group.setup': '首次使用引导',
+        'action.refreshSetup': '重新检查接入方式',
+        'action.checking': '检查中…',
+        'setup.ready': '接入可用',
+        'setup.notReady': '尚未配置完成，模型调用会失败',
+        'setup.pending': '尚未检查',
+        'setup.fix': '修复步骤：',
+        'setup.warn': '注意：',
         'hint.cli': 'CLI 后端走豆包官方 CLI 的登录态（doubao login 扫码一次），不依赖桌面端 cookie；它还自带工具执行与本地文件能力。HTTP 后端复用桌面端 cookie，约 30 天过期。',
         'group.hint': '说明',
         'hint.keepalive': '豆包没有「签到」概念，保活巡检为等价功能：每日定时验证各账号 cookie 是否仍被豆包接受。纯读操作，不产生会话记录。',
@@ -131,6 +140,14 @@ window.__ModuleLoader__.load({
         'cli.unknown': 'not probed yet',
         'action.refreshCli': 'Probe CLI again',
         'action.refreshing': 'Probing…',
+        'group.setup': 'Getting started',
+        'action.refreshSetup': 'Check again',
+        'action.checking': 'Checking…',
+        'setup.ready': 'Ready to use',
+        'setup.notReady': 'Not configured yet — model calls will fail',
+        'setup.pending': 'Not checked yet',
+        'setup.fix': 'How to fix:',
+        'setup.warn': 'Note:',
         'hint.cli': 'The CLI backend uses the official Doubao CLI login (scan a QR code once with doubao login) and does not depend on the desktop cookie; it also brings tool execution and local file access. The HTTP backend reuses the desktop cookie, which expires in about 30 days.',
         'group.hint': 'Notes',
         'hint.keepalive': 'Doubao has no check-in concept; the keepalive probe is the equivalent: a daily read-only check that each account cookie is still accepted. It creates no Doubao conversations.',
@@ -150,6 +167,7 @@ window.__ModuleLoader__.load({
       const [statusError, setStatusError] = react.useState(false)
       const [probing, setProbing] = react.useState(false)
       const [refreshing, setRefreshing] = react.useState(false)
+      const [checking, setChecking] = react.useState(false)
 
       const value = draft ?? config
       const dirty = draft !== null
@@ -210,6 +228,20 @@ window.__ModuleLoader__.load({
         }
       }
 
+      const refreshSetup = async () => {
+        setChecking(true)
+        try {
+          const response = await fetch(SETUP_PATH, { method: 'POST', headers: { accept: 'application/json' } })
+          if (response.ok) {
+            const data = await response.json()
+            setStatus(current => ({ ...(current ?? {}), setup: data }))
+            setStatusError(false)
+          }
+        } catch {} finally {
+          setChecking(false)
+        }
+      }
+
       const rowStyle = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', padding: '6px 0' }
       const labelStyle = { flex: '0 0 auto', maxWidth: '60%' }
       const sectionTitle = { margin: '14px 0 4px', fontSize: '0.92em', opacity: 0.8 }
@@ -218,6 +250,35 @@ window.__ModuleLoader__.load({
       const rows = []
       rows.push(h('div', { key: 'title', style: { fontWeight: 600, marginBottom: 2 } }, t('card.title')))
       rows.push(h('div', { key: 'desc', style: { opacity: 0.7, fontSize: '0.9em' } }, t('card.desc')))
+
+      // —— 首次使用引导：没配好就把安装/配置步骤直接摊在卡片顶部 ——
+      rows.push(h('div', { key: 'g0', style: sectionTitle }, t('group.setup')))
+      const setup = status?.setup
+      if (setup === undefined || setup === null || setup.pending === true) {
+        rows.push(h('div', { key: 'setup-pending', style: { opacity: 0.7, fontSize: '0.88em' } }, t('setup.pending')))
+      } else {
+        rows.push(h('div', { key: 'setup-head', style: rowStyle },
+          h('span', null, setup.ready === true ? t('setup.ready') : t('setup.notReady')),
+          h('span', { style: { fontSize: '0.85em', opacity: 0.8 } },
+            setup.ready === true ? '✓' : (setup.summary?.cliInstalled === true ? `CLI v${setup.summary?.cliVersion ?? ''}` : '')),
+        ))
+        const steps = Array.isArray(setup.steps) ? setup.steps : []
+        for (const step of steps) {
+          const mark = step.status === 'done' ? '✓' : step.status === 'warn' ? '!' : step.status === 'blocked' ? '✗' : '○'
+          rows.push(h('div', { key: `setup-${step.id}`, style: { padding: '4px 0 4px 10px', fontSize: '0.88em' } },
+            h('div', null, `${mark} ${step.title}：${step.detail}`),
+            step.warn ? h('div', { style: { opacity: 0.75, paddingLeft: 12 } }, `${t('setup.warn')}${step.warn}`) : null,
+            (Array.isArray(step.fix) && step.fix.length > 0)
+              ? h('div', { style: { opacity: 0.8, paddingLeft: 12, fontFamily: 'monospace' } },
+                h('div', null, t('setup.fix')),
+                ...step.fix.map((line, index) => h('div', { key: `fix-${index}` }, line)))
+              : null,
+          ))
+        }
+      }
+      rows.push(h('div', { key: 'setup-refresh', style: rowStyle },
+        h('button', { type: 'button', disabled: checking, onClick: refreshSetup }, checking ? t('action.checking') : t('action.refreshSetup')))
+      )
 
       // —— 网关选项（settingsScope 缺席时降级为只读说明）——
       rows.push(h('div', { key: 'g1', style: sectionTitle }, t('group.gateway')))

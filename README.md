@@ -30,6 +30,7 @@ DSH 宿主 ──pi-ai──▶ 本地回环网关 ──┤   （构造工作�
 | `adapter.js` | `createProvider` + `openAICompletionsApi` + `PiAiAdapter` 装配 |
 | `catalog.js` | 模型目录（静态 10 个 + CLI 动态清单合并，含别名） |
 | `credentials.js` | 豆包登录态加载（手动导入 / 桌面端自动发现） |
+| `onboarding.js` | 首次使用引导：探测接入方式、生成修复步骤（只读、无凭据输出） |
 | `config.js` | 配置 schema 与默认常量 |
 | `plugin.js` | 宿主注册编排（adapter → 目录 → discovery，含失败回收） |
 
@@ -78,6 +79,33 @@ pnpm remove dsh-connect-doubaowork && pnpm add file:/绝对路径/dsh-connect-do
 ```
 
 > 注意：请用 `file:` 而不是 `link:`。本插件把 `@deepseek-ai/*`、`@earendil-works/pi-ai` 声明为 peerDependencies，`link:` 建立的软链不会从目标目录解析 peer 包，会导致宿主加载失败。
+
+## 首次使用引导
+
+插件装好后**第一次启动**会自检这台机器上有没有可用的豆包接入方式，结果同时出现在三处：
+
+1. **宿主日志**——两者都不可用时打 warn，并把完整的修复步骤贴进去（含可直接复制的命令）；
+2. **设置 → 插件 → 豆包工作模式** 卡片顶部「首次使用引导」区块——三步状态灯 + 每步的修复命令；
+3. **`GET /plugins/dsh-connect-doubaowork/status`** 的 `setup` 字段（供脚本消费）。
+
+检查的三步：
+
+| 步骤 | 说明 |
+| --- | --- |
+| 豆包登录态（HTTP 后端） | 凭据文件是否存在、能否解析、是否含 `sessionid`、账号数；权限过宽（如 644）会提示 `chmod 600` |
+| 豆包 CLI（推荐） | `doubao` 命令是否可用、版本号、是否已登录 |
+| 可用接入方式 | 至少一条通才算就绪；都不通时明确告知「模型调用会返回 503」 |
+
+**没装 CLI 时，引导会直接给出这两条命令：**
+
+```sh
+npm i -g @bytedance/doubao-cli
+doubao login            # 扫码一次，登录态长期有效
+```
+
+装完点卡片上的「重新检查接入方式」，或重启 DSH，`backend: auto` 会自动从 HTTP 切到 CLI。
+
+引导只做只读探测（读凭据文件形状、拉两个 CLI 子进程），**不写任何文件、不改配置、不采集也不上报任何机器信息**。
 
 ## 豆包 CLI 后端（推荐）
 
@@ -161,6 +189,8 @@ HTTP 后端需要豆包登录态；如果只用 CLI 后端（`backend: "cli"`）
 
 插件自带 DSH Web GUI 设置卡片（`dsh.client` 注入，无需构建）：在 **DSH 设置 → 插件 → 豆包工作模式** 中可读写网关选项（会话归属、工作模式、思考强度、超时等）、查看账号池健康状态、手动触发保活巡检。卡片另有一块「上游后端 / 豆包 CLI」区域：可切换 `backend`、填写 `cliPath` 与工作目录、选择 CLI 权限模式与推理强度，并显示 CLI 的安装/登录状态与拉到的模型清单，提供「重新探测 CLI」按钮（`POST /plugins/dsh-connect-doubaowork/cli/refresh`）。
 
+卡片顶部还有「首次使用引导」区块（见上文），显示三步状态灯与修复命令，并提供「重新检查接入方式」按钮（`POST /plugins/dsh-connect-doubaowork/setup`）。
+
 卡片对配置采用「草稿-保存」模式：改动先落在草稿，点「保存设置」才写回；健康状态为只读测量值（由巡检写入 `~/.dsh-doubao/pool-state.json`）。老版本宿主不提供设置插槽时，卡片自动降级或隐藏，不影响网关本体。
 
 ## 账号池与保活巡检
@@ -213,13 +243,34 @@ HTTP 后端需要豆包登录态；如果只用 CLI 后端（`backend: "cli"`）
 - **CLI 报 `login_required`？** 执行 `doubao login` 扫码一次。登录态保存在 `~/Library/Application Support/doubao_cli/doubao-cli-pc-login/`（macOS），与桌面端 cookie 无关。
 - **插件找不到 `doubao`？** 自动探测顺序是 npm 全局 bin → `~/.local/bin` → `/opt/homebrew/bin` → `/usr/local/bin` → `PATH`。都不命中时在配置里填 `cliPath` 绝对路径。
 
+## 隐私与数据流向
+
+本插件**不含任何个人身份信息、硬编码凭据、遥测或自动上报**。所有出站流量只有两个目标：
+
+| 目标 | 何时 | 内容 |
+| --- | --- | --- |
+| `https://www.doubao.com/chat/completion` | 使用 HTTP 后端时 | 你的对话内容 + Cookie（本地读取，不写日志） |
+| 本机 `doubao` 子进程 | 使用 CLI 后端时 | 你的对话内容（经 stdin/argv 传给 CLI，由 CLI 自己联网） |
+
+本地读取（只读，限于取得登录态）：
+
+- `~/.dsh-doubao/credentials.json`——你自己写的 Cookie 文件（建议 `chmod 600`）
+- `~/Library/Application Support/Doubao/Local State`——**可选**，仅当凭据文件不存在且开启 `autoDiscoverCredentials` 时，用于从豆包桌面端发现登录态
+- `~/Library/Application Support/doubao_cli/`——`doubao` CLI 自己的登录态（由 CLI 管理，插件不解析）
+
+本插件会写的文件（都在用户目录，不进仓库）：
+
+- `~/.dsh-doubao/pool-state.json`——账号探测结果（只有 HTTP 状态码、时间戳、账号 id，**不含 Cookie**）
+
+日志脱敏约定：插件在任何日志、错误信息、引导输出里**都不打印 Cookie、token、device_id 的实际取值**；引导只报告「有无 / 能否解析 / 账号数」这类形状信息，并有专门的回归用例（`tests/onboarding.test.js` 的「summary 不含任何凭据内容」）守护。
+
 ## 测试
 
 ```sh
 node --test "tests/*.test.js"
 ```
 
-99 个用例，覆盖协议解析、网关、账号池、保活巡检、CLI 后端（NDJSON 事件、串行队列、探测、超时/取消）、目录合并与设置卡片渲染。CLI 相关用例全部用假子进程（`EventEmitter` + `Readable`）驱动，不依赖本机是否装了豆包 CLI。另有一组用例直接对真实 `doubao` 二进制做探测（未安装时自动跳过）。
+114 个用例，覆盖协议解析、网关、账号池、保活巡检、CLI 后端（NDJSON 事件、串行队列、探测、超时/取消）、目录合并与设置卡片渲染。CLI 相关用例全部用假子进程（`EventEmitter` + `Readable`）驱动，不依赖本机是否装了豆包 CLI；`tests/onboarding.test.js` 的 12 个用例覆盖首次引导的三态与隐私回归；`tests/client.test.js` 用带 hooks 槽位的假 react 真正驱动卡片重渲染（含引导区块渲染）。
 
 纯 ESM JavaScript，零构建、零运行时依赖（仅 Node 内置模块 + 宿主 peer 包）。
 

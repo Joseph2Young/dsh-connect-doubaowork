@@ -10,19 +10,74 @@ import path from 'node:path'
  */
 const CLIENT_SOURCE = fs.readFileSync(new URL('../client.js', import.meta.url), 'utf8')
 
-/** 最小假 react：createElement 返回 {type, props} 树 + 常用 hooks stub。 */
+/**
+ * 假 react：createElement 返回 {type, props, children} 树；hooks 带「槽位持久化」，
+ * 首次渲染时执行 useEffect，setState 会触发重渲染。这样能测到「fetch 拿到数据后
+ * 卡片重绘成什么」，而不只是首帧的静态文案。
+ */
 function makeFakeReact() {
-  return {
+  const store = []
+  let cursor = 0
+  let rerender = null
+  const react = {
     createElement: (type, props, ...children) => ({
       type,
       props: props ?? {},
       children: children.flat().filter(Boolean),
     }),
-    useState: init => [typeof init === 'function' ? init() : init, () => {}],
-    useEffect: () => {},
-    useRef: value => ({ current: value }),
-    useCallback: fn => fn,
-    useMemo: fn => fn(),
+    useState: init => {
+      const index = cursor
+      cursor += 1
+      if (!(index in store)) store[index] = typeof init === 'function' ? init() : init
+      const set = next => {
+        store[index] = typeof next === 'function' ? next(store[index]) : next
+        if (rerender !== null) rerender()
+      }
+      return [store[index], set]
+    },
+    // 只在首次渲染执行一次（依赖不变的真实语义在此简化）
+    useEffect: fn => {
+      const index = cursor
+      cursor += 1
+      if (!store[index]) {
+        store[index] = true
+        fn()
+      }
+    },
+    useRef: value => {
+      const index = cursor
+      cursor += 1
+      if (!(index in store)) store[index] = { current: value }
+      return store[index]
+    },
+    useCallback: fn => {
+      const index = cursor
+      cursor += 1
+      if (!(index in store)) store[index] = fn
+      return store[index]
+    },
+    useMemo: fn => {
+      const index = cursor
+      cursor += 1
+      if (!(index in store)) store[index] = fn()
+      return store[index]
+    },
+  }
+  return {
+    react,
+    /** 渲染一次，返回 createElement 树。 */
+    render(component, props) {
+      cursor = 0
+      return component(props)
+    },
+    /** 注册重渲染回调：setState 后由它把最新树写进 lastTree。 */
+    onRerender(component, props) {
+      const box = { tree: null }
+      rerender = () => {
+        box.tree = this.render(component, props)
+      }
+      return box
+    },
   }
 }
 
@@ -33,16 +88,51 @@ function loadClientBundle() {
       load: bundle => { registrations.loader = bundle },
     },
   }
+  // 同一个 react 实例贯穿 bundle 与测试渲染器：store 与 rerender 必须共享，
+  // 否则组件里的 setState 触发不到测试侧的重渲染
+  const reactHarness = makeFakeReact()
   const sandbox = new Function('window', 'require', `${CLIENT_SOURCE}\n;//# sourceURL=client.test.js`)
   sandbox(fakeWindow, name => {
-    if (name === 'react') return makeFakeReact()
+    if (name === 'react') return reactHarness.react
     throw new Error(`unexpected require: ${name}`)
   })
   assert.ok(registrations.loader, 'bundle must call __ModuleLoader__.load')
-  const exports = registrations.loader.factory(() => makeFakeReact())
+  const exports = registrations.loader.factory(() => reactHarness.react)
   assert.equal(exports.name, 'dsh-connect-doubaowork-client')
   assert.deepEqual(exports.inject, ['slots', 'locale'])
-  return { exports, registrations }
+  return { exports, registrations, react: reactHarness }
+}
+
+/**
+ * 用假 fetch 驱动卡片：先渲染一次（useEffect 拉 status），等 Promise 落定，
+ * 再由 setState 触发的重渲染拿到最终树。返回扁平文本。
+ */
+async function renderCardWithStatus(statusPayload) {
+  const { exports, react } = loadClientBundle()
+  const { ctx, slotRegistrations } = makeFakeCtx()
+  exports.apply(ctx)
+  const section = slotRegistrations.find(entry => entry.entry?.name === 'settings.section')
+  const props = section.entry.inject()
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => ({ ok: true, json: async () => statusPayload })
+  try {
+    const box = react.onRerender(section.component, props)
+    box.tree = react.render(section.component, props)
+    // 让 useEffect 里的 fetch.then 落定，setState 会同步触发 rerender
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const texts = []
+    const walk = node => {
+      if (node === null || node === undefined || typeof node !== 'object') return
+      for (const child of Array.isArray(node.children) ? node.children : []) {
+        if (typeof child === 'string') texts.push(child)
+        else walk(child)
+      }
+    }
+    walk(box.tree)
+    return texts.join('|')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
 }
 
 function makeFakeCtx({ withForms = true } = {}) {
@@ -143,6 +233,45 @@ test('client bundle：卡片渲染核心分组（无 JSX，纯 createElement 树
   assert.match(flat, /豆包 CLI/)
   assert.match(flat, /后端选择/)
   assert.match(flat, /重新探测 CLI/)
+  // 首次使用引导区块（0.3.0 新增）：没配好要让用户看到「装什么、跑什么」
+  assert.match(flat, /首次使用引导/)
+  assert.match(flat, /重新检查接入方式/)
+})
+
+test('client bundle：引导区块把未配置的修复步骤渲染成可复制文本', async () => {
+  const flat = await renderCardWithStatus({
+    setup: {
+      ready: false,
+      pending: false,
+      summary: { cliInstalled: false },
+      steps: [
+        { id: 'credentials', title: '豆包登录态', status: 'todo', detail: '未找到豆包登录态', fix: ['写入 ~/.dsh-doubao/credentials.json'] },
+        { id: 'cli', title: '豆包 CLI', status: 'todo', detail: '未检测到 doubao 命令', fix: ['npm i -g @bytedance/doubao-cli', 'doubao login'] },
+      ],
+    },
+  })
+  assert.match(flat, /尚未配置完成/)
+  assert.match(flat, /npm i -g @bytedance\/doubao-cli/)
+  assert.match(flat, /doubao login/)
+  assert.match(flat, /修复步骤/)
+})
+
+test('client bundle：引导快照 pending 时显示「尚未检查」而不是空白', async () => {
+  const flat = await renderCardWithStatus({ setup: { ready: false, pending: true, steps: [], summary: {} } })
+  assert.match(flat, /尚未检查/)
+})
+
+test('client bundle：接入可用时引导显示 ✓ 而不是报警', async () => {
+  const flat = await renderCardWithStatus({
+    setup: {
+      ready: true,
+      pending: false,
+      summary: { cliReady: true, cliInstalled: true, cliVersion: '2.37.2' },
+      steps: [{ id: 'ready', title: '可用接入方式', status: 'done', detail: '仅 CLI 可用', fix: [] }],
+    },
+  })
+  assert.match(flat, /接入可用/)
+  assert.doesNotMatch(flat, /尚未配置完成/)
 })
 
 test('声明 dsh.client 的包必须在 exports 暴露 ./client 且目标文件存在（宿主冷启动硬校验）', () => {

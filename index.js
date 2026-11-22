@@ -14,6 +14,7 @@ import { createDoubaoShim } from './shim.js'
 import { createDoubaoAdapter } from './adapter.js'
 import { createKeepalive } from './keepalive.js'
 import { createCliClient, fetchCliModels, probeCli } from './cli-backend.js'
+import { inspectSetup, formatSetupGuide } from './onboarding.js'
 import { registerPluginRoutes } from './routes.js'
 import { bootstrap } from './plugin.js'
 
@@ -78,6 +79,33 @@ export function apply(ctx, config) {
     return { ...cliState, models: cliModels }
   }
 
+  // 首次使用引导：检查本机有没有可用接入方式（CLI 或 Cookie），没有就给出安装/配置步骤
+  const inspect = () => inspectSetup({
+    credentialsFile: typeof config?.credentialsFile === 'string' ? config.credentialsFile : normalized.credentialsFile,
+    autoDiscover: config?.autoDiscoverCredentials !== false,
+    cliPath: cliPath(),
+    account: config?.account ?? normalized.account,
+  })
+  // 引导快照：初始为「尚未检查」，refreshSetup() 后填真值；失败也留一条可读结果
+  let setupState = { ready: false, backend: '', steps: [], summary: {}, pending: true }
+  const refreshSetup = async () => {
+    try {
+      const result = await inspect()
+      setupState = { ...result, pending: false }
+      return setupState
+    } catch (error) {
+      setupState = {
+        ready: false,
+        backend: '',
+        steps: [],
+        summary: {},
+        pending: false,
+        error: String(error?.message ?? error),
+      }
+      return setupState
+    }
+  }
+
   const shim = createDoubaoShim({
     catalog: models,
     resolveModel,
@@ -134,9 +162,12 @@ export function apply(ctx, config) {
       lastRun: keepalive.readState().lastRun ?? null,
       backend: normalized.backend,
       cli: { ...cliState, models: cliModels.map(model => model.id) },
+      // 首次使用引导快照（不含任何凭据内容）
+      setup: setupState,
     }),
     runKeepalive: () => keepalive.runNow('manual'),
     refreshCli: () => refreshCli(),
+    refreshSetup: () => refreshSetup(),
   })
   ctx.effect(() => () => {
     disposeRoutes?.()
@@ -190,6 +221,18 @@ export function apply(ctx, config) {
         if (!stopped && state.models.length > 0) adapter.invalidate()
       }).catch(error => {
         if (!stopped) log('warn', `豆包 CLI 探测失败（不影响 HTTP 后端）：${error?.message ?? error}`)
+      })
+      // 首次使用引导：没有任何可用接入方式时把完整步骤打进日志，
+      // 这样用户即使还没打开设置页，也能在日志里看到「该装什么、该跑什么」
+      void refreshSetup().then(state => {
+        if (stopped) return
+        if (state.ready === true) {
+          log('info', `豆包插件就绪（${state.summary?.cliReady ? 'CLI' : 'HTTP'} 接入可用）`)
+          return
+        }
+        log('warn', `豆包插件尚未配置完成，模型调用会失败。修复步骤：\n${formatSetupGuide(state)}`)
+      }).catch(error => {
+        if (!stopped) log('warn', `豆包首次使用引导检查失败：${error?.message ?? error}`)
       })
     })
     .catch(error => {
