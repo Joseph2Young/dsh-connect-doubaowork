@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createDoubaoAdapter, toPiModel, DOUBAO_STREAM_IDLE_TIMEOUT_MS } from '../adapter.js'
-import { bootstrap } from '../plugin.js'
+import { bootstrap, bindSettingsNamespace } from '../plugin.js'
 import { deriveCatalog } from '../catalog.js'
 
 const HOST = {
@@ -139,4 +139,85 @@ test('bootstrap 目录注册失败时回收路由', () => {
     /DUPLICATE_DIRECTORY/,
   )
   assert.equal(released, true)
+})
+
+// ── 0.5.0：settings 命名空间绑定（决定 provider 能否出现在「设置 → 模型」页） ──
+// 宿主 dsh-settings 的 describe() 只收录「Config 至少有一个 .volatile() 字段」的
+// 条目；模型页要 state.namespaces.has(settingsNs) 才渲染行。所以插件必须在
+// apply 期把 Config 挂进 settings 服务（settings.configure）。
+
+test('bindSettingsNamespace：优先响应式等待 settings 服务，configure 立即生效', () => {
+  const injected = []
+  const effectCalls = []
+  const configured = []
+  const fakeCtx = {
+    fiber: { id: 'fiber-1' },
+    inject: (names, callback) => {
+      injected.push(names)
+      callback({
+        settings: {
+          configure: (presentation, owner) => {
+            configured.push([presentation, owner])
+            return () => configured.push(['dispose'])
+          },
+        },
+      })
+    },
+    effect: (fn, label) => {
+      effectCalls.push(label)
+      const cleanup = fn()
+      return cleanup
+    },
+  }
+  let ready = null
+  const dispose = bindSettingsNamespace(fakeCtx, { onReady: settings => { ready = settings } })
+  assert.deepEqual(injected, [['settings']])
+  assert.equal(configured.length, 1)
+  assert.deepEqual(configured[0][0], { auto: false }, 'auto:false 表示不额外生成宿主渲染的配置页')
+  assert.equal(configured[0][1], fakeCtx.fiber, 'configure 必须绑定本插件的 fiber')
+  assert.deepEqual(effectCalls, ['dsh-connect-doubaowork: settings presentation'])
+  assert.ok(ready !== null, 'settings 就绪后应回调 onReady')
+  assert.equal(typeof dispose, 'function')
+})
+
+test('bindSettingsNamespace：没有 inject 的老宿主退回同步探测', () => {
+  const effectLabels = []
+  const fakeCtx = {
+    fiber: {},
+    get: name => (name === 'settings' ? { configure: () => () => {} } : undefined),
+    effect: (fn, label) => {
+      effectLabels.push(label)
+      return fn()
+    },
+  }
+  bindSettingsNamespace(fakeCtx)
+  assert.deepEqual(effectLabels, ['dsh-connect-doubaowork: settings presentation'])
+})
+
+test('bindSettingsNamespace：settings 缺席时静默降级（不抛错、不注册）', () => {
+  const effectLabels = []
+  const fakeCtx = {
+    fiber: {},
+    get: () => undefined,
+    effect: (fn, label) => {
+      effectLabels.push(label)
+      return fn()
+    },
+  }
+  assert.doesNotThrow(() => bindSettingsNamespace(fakeCtx))
+  assert.deepEqual(effectLabels, [])
+})
+
+test('bindSettingsNamespace：settings 服务存在但缺 configure 时不注册', () => {
+  const effectLabels = []
+  const fakeCtx = {
+    fiber: {},
+    inject: (names, callback) => callback({ settings: {} }),
+    effect: (fn, label) => {
+      effectLabels.push(label)
+      return fn()
+    },
+  }
+  assert.doesNotThrow(() => bindSettingsNamespace(fakeCtx))
+  assert.deepEqual(effectLabels, [])
 })
