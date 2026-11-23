@@ -1,15 +1,21 @@
 /**
- * 每日保活巡检：定时检查各账号 cookie 是否仍被豆包接受，结果落
+ * 每日保活巡检：定时检查各账号登录态是否仍然有效，结果落
  * ~/.dsh-doubao/pool-state.json 供设置页展示。
  *
- * 与 workbuddy 的「自动签到」对位：豆包侧没有签到/积分概念（免费额度随账号
- * 自带，无需每日领取），这里落地为等价的「账号每日健康巡检」——纯读操作，
- * 默认关闭（opt-in），不替用户改变任何上游状态。
+ * 与 workbuddy 的「自动签到」对位：豆包的「签到」= 每天用登录态访问一次豆包
+ * （见 checkin.js），这里只做等价的健康巡检——默认关闭（opt-in），不替用户
+ * 改变任何上游状态。
  *
- * 巡检是弱验证：带 cookie GET 豆包首页（redirect: manual）。cookie 被服务端
- * 拒绝（302/403）说明登录态失效；200 不能 100% 证明会话仍有效（可能是登录页
- * SPA），但足以覆盖「cookie 过期」这一最主要的失效形态。更强验证需要真实发
- * 起一次 chat 请求，会在豆包侧留下会话记录，与减少留痕的目标冲突，故不采用。
+ * ## 探针为什么不是「GET 首页看状态码」
+ *
+ * 早期实现带 cookie `GET https://www.doubao.com/` 并判定 2xx 才算有效。但该
+ * URL **无论 cookie 是否有效都会 302 到 `/chat/`**（无 cookie 也是 302），于是
+ * 判定永远为假，设置卡片长期显示「账号池 异常（HTTP 302）」——那是纯误报。
+ *
+ * 现在改用豆包自己的登录态探针 `/samantha/user/preference/get`：它总是返回
+ * HTTP 200，靠 JSON 业务码区分身份——`code:0` 表示登录态有效，`code:710012001`
+ * 表示「登录已过期」。判定不看 HTTP 状态码，不会被重定向误导；这个接口不是
+ * chat 接口，也不会在豆包侧产生会话记录。
  */
 import fs from 'node:fs'
 import os from 'node:os'
@@ -34,26 +40,57 @@ export function nextRunDelay(now = new Date(), hour = KEEPALIVE_DEFAULT_HOUR, mi
 }
 
 /**
- * 单账号健康探测：带 cookie GET 豆包首页。
- * @returns {Promise<{ok: boolean, status: number, detail?: string}>}
+ * 豆包登录态探针：POST `/samantha/user/preference/get`，按业务码判定。
+ * 与 checkin.js 共用同一个接口语义（那边是「签到」，这边是「健康巡检」）。
+ */
+export const LOGIN_PROBE_URL = 'https://www.doubao.com/samantha/user/preference/get'
+
+/** 登录已过期的业务码。 */
+export const CODE_LOGIN_INVALID = 710012001
+
+/**
+ * 单账号健康探测。
+ * @returns {Promise<{ok: boolean, status: number, loggedIn: boolean, code: number, detail?: string}>}
  */
 export async function probeAccount(account, { fetchImpl = fetch, userAgent = '', timeoutMs = 15000 } = {}) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(new Error('巡检超时')), timeoutMs)
   try {
-    const response = await fetchImpl('https://www.doubao.com/', {
-      method: 'GET',
+    const response = await fetchImpl(LOGIN_PROBE_URL, {
+      method: 'POST',
       headers: {
         'User-Agent': userAgent !== '' ? userAgent : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+        'Content-Type': 'application/json',
         Cookie: account?.cookie ?? '',
       },
+      body: '{}',
       redirect: 'manual',
       signal: controller.signal,
     })
-    // 2xx = cookie 被接受；302/403 = 登录态失效
-    return { ok: response.status >= 200 && response.status < 300, status: response.status }
+    let code = -1
+    try {
+      const parsed = JSON.parse(await response.text())
+      code = typeof parsed?.code === 'number' ? parsed.code : -1
+    } catch {
+      code = -1
+    }
+    // 只有业务码 0 才算登录态有效；710012001 = 登录已过期
+    const loggedIn = code === 0
+    return {
+      ok: loggedIn,
+      status: response.status,
+      loggedIn,
+      code,
+      ...(loggedIn || code === CODE_LOGIN_INVALID ? {} : { detail: `未识别的状态码 ${code}` }),
+    }
   } catch (error) {
-    return { ok: false, status: 0, detail: error?.message ?? String(error) }
+    return {
+      ok: false,
+      status: 0,
+      loggedIn: false,
+      code: -1,
+      detail: error?.message ?? String(error),
+    }
   } finally {
     clearTimeout(timer)
   }
@@ -100,7 +137,10 @@ export function createKeepalive({ accounts, log = () => {}, statePath = POOL_STA
       for (const account of list) {
         const probe = await probeAccount(account, { fetchImpl, userAgent })
         results[account.id] = { ...probe, checkedAt: new Date().toISOString() }
-        if (probe.ok !== true) log('warn', `账号 ${account.id} 保活巡检未通过（HTTP ${probe.status}${probe.detail ? `: ${probe.detail}` : ''}）`)
+        if (probe.ok !== true) {
+          const reason = probe.detail ?? (probe.code === CODE_LOGIN_INVALID ? '登录已过期' : `未识别的状态码 ${probe.code}`)
+          log('warn', `账号 ${account.id} 保活巡检未通过（业务码 ${probe.code}：${reason}）`)
+        }
       }
       const state = { lastRun: new Date().toISOString(), reason, results }
       try {

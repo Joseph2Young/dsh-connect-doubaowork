@@ -13,6 +13,7 @@ import { buildRequestBody, pumpSse } from './doubao-protocol.js'
 import { createDoubaoShim } from './shim.js'
 import { createDoubaoAdapter } from './adapter.js'
 import { createKeepalive } from './keepalive.js'
+import { createCheckin } from './checkin.js'
 import { createCliClient, fetchCliModels, probeCli } from './cli-backend.js'
 import { inspectSetup, formatSetupGuide } from './onboarding.js'
 import { registerPluginRoutes } from './routes.js'
@@ -212,6 +213,23 @@ export function apply(ctx, config) {
   })
   keepalive.schedule()
 
+  // 每日自动签到：豆包的「签到」= 每天用登录态访问一次豆包（服务端按「每日首次
+  // 登录」发 80-150 积分），没有签到接口也没有签到按钮，所以这里做的是「每天
+  // 定时带 cookie 真实访问一次」。与保活巡检共用同一套判定（业务码 0）。
+  const checkin = createCheckin({
+    accounts,
+    log,
+    userAgent: String(pick('userAgent') ?? normalized.userAgent),
+    enabled: false,
+    enabledOf: () => pick('checkinEnabled') === true,
+    hourOf: () => Number(pick('checkinHour') ?? normalized.checkinHour),
+    minuteOf: () => Number(pick('checkinMinute') ?? normalized.checkinMinute),
+  })
+  ctx.effect(() => () => {
+    checkin.stop()
+  })
+  checkin.schedule()
+
   // 插件路由：设置卡片读账号健康状态、手动触发巡检（webServer 缺席则降级）
   const disposeRoutes = registerPluginRoutes(ctx, {
     status: () => ({
@@ -224,6 +242,25 @@ export function apply(ctx, config) {
       poolEnabled: pick('poolEnabled') === true,
       keepaliveEnabled: pick('keepaliveEnabled') === true,
       lastRun: keepalive.readState().lastRun ?? null,
+      // 每日签到快照：开关、时刻、最近一轮结果、下一次触发时间
+      checkin: {
+        enabled: pick('checkinEnabled') === true,
+        hour: Number(pick('checkinHour') ?? normalized.checkinHour),
+        minute: Number(pick('checkinMinute') ?? normalized.checkinMinute),
+        nextRunAt: checkin.nextRunAt(),
+        running: checkin.running(),
+        lastRun: checkin.readState().lastRun ?? null,
+        lastDay: checkin.readState().lastDay ?? null,
+        signedCount: checkin.readState().signedCount ?? 0,
+        skipped: checkin.readState().skipped ?? 0,
+        // 逐账号结果：只报登录态是否有效与业务码，不报 cookie
+        accounts: accounts().map(account => {
+          const result = checkin.readState().results?.[account.id]
+          return result === undefined
+            ? { id: account.id, ok: null, day: null }
+            : { id: account.id, ok: result.ok, day: result.day ?? null, code: result.code ?? null, detail: result.detail ?? null }
+        }),
+      },
       backend: backendOf(),
       // 实际生效的接入方式与「当前后端的模型清单」——设置卡片据此说明现在列的是哪一套
       effectiveBackend: effectiveBackend(),
@@ -242,6 +279,7 @@ export function apply(ctx, config) {
       login: login.snapshot(),
     }),
     runKeepalive: () => keepalive.runNow('manual'),
+    runCheckin: () => checkin.runNow('manual', { force: true }),
     refreshCli: () => refreshCli(),
     refreshSetup: () => refreshSetup(),
     login: {
@@ -273,6 +311,9 @@ export function apply(ctx, config) {
   ctx.on?.('loader/volatile-update', () => {
     if (stopped) return
     adapterApi?.invalidate()
+    // 签到开关/时刻也是 volatile 字段：改动是就地更新，不重挂插件，
+    // 所以要主动重排定时器，否则用户开了签到也要等下次插件重载才生效。
+    checkin.reschedule()
   })
   // 探测 CLI（子进程 --version / auth status，约 0.6s）与首次引导检查。
   // 都在注册前后判一次 stopped，避免插件已卸载还去拉子进程。

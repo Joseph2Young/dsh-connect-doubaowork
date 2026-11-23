@@ -18,6 +18,11 @@ export const DOUBAO_DEFAULTS = Object.freeze({
   // 账号池故障转移与每日保活巡检：均 opt-in（默认关），不替用户改变请求行为
   poolEnabled: false,
   keepaliveEnabled: false,
+  // 每日自动签到：豆包没有签到接口，「签到」= 每天用登录态访问一次豆包（发免费积分）。
+  // 默认关（opt-in）：这是唯一会主动访问上游的定时任务。
+  checkinEnabled: false,
+  checkinHour: 8,
+  checkinMinute: 10,
   // 后端：auto = 装好 CLI 且已登录则用 CLI，否则回落 HTTP 抓包（默认，零配置最省心）
   backend: 'auto',
   cliPath: '',
@@ -88,6 +93,9 @@ export const VOLATILE_FIELDS = Object.freeze([
   'conversationMode',
   'poolEnabled',
   'keepaliveEnabled',
+  'checkinEnabled',
+  'checkinHour',
+  'checkinMinute',
   'backend',
   'cliPath',
   'cliWorkspace',
@@ -129,7 +137,10 @@ export function createConfigSchema(z) {
       enabled: z.boolean().default(true).description('是否参与账号池调度'),
     }).description('主账号（兼容旧单账号凭据；账号池的保底成员）'),
     poolEnabled: volatileField(z.boolean().default(DOUBAO_DEFAULTS.poolEnabled).description('账号池故障转移：请求失败时自动换下一个启用账号重试')),
-    keepaliveEnabled: volatileField(z.boolean().default(DOUBAO_DEFAULTS.keepaliveEnabled).description('每日保活巡检：定时检查各账号 cookie 是否仍被豆包接受并记录健康状态（读操作，默认关）')),
+    keepaliveEnabled: volatileField(z.boolean().default(DOUBAO_DEFAULTS.keepaliveEnabled).description('每日保活巡检：定时检查各账号登录态是否仍有效并记录健康状态（只发一次登录态探针，不产生豆包会话，默认关）')),
+    checkinEnabled: volatileField(z.boolean().default(DOUBAO_DEFAULTS.checkinEnabled).description('每日自动签到：每天定时用登录态访问一次豆包（豆包的免费积分按「当日首次登录」发放，默认关）')),
+    checkinHour: volatileField(z.number().default(DOUBAO_DEFAULTS.checkinHour).description('签到时刻（小时，0-23，本地时区）')),
+    checkinMinute: volatileField(z.number().default(DOUBAO_DEFAULTS.checkinMinute).description('签到时刻（分钟，0-59）')),
     backend: volatileField(z.string().default(DOUBAO_DEFAULTS.backend).description('上游后端：auto = 装好豆包 CLI 且已登录时优先 CLI，否则用 HTTP 抓包（默认）；cli = 只用 CLI；http = 只用 HTTP 抓包')),
     cliPath: volatileField(z.string().default('').description('doubao 可执行文件路径；留空自动探测 npm 全局 bin / PATH')),
     cliWorkspace: volatileField(z.string().default('').description('CLI 任务工作目录（-C）；留空用用户主目录')),
@@ -187,6 +198,14 @@ function clampNonNegativeInt(value, fallback) {
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback
 }
 
+/** 闭区间整数收口：越界或非数字一律回落 fallback（签到时/分用）。 */
+function clampRange(value, min, max, fallback) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return fallback
+  const i = Math.floor(n)
+  return i >= min && i <= max ? i : fallback
+}
+
 /** 把宿主配置归一为内部运行参数（无 schema 环境也能安全读取）。 */
 export function normalizeConfig(config) {
   // 宿主可能把 volatile 字段解析成 {get()} 引用对象，先整体解包再收口
@@ -213,6 +232,9 @@ export function normalizeConfig(config) {
     account: normalizeAccountShape(raw.account),
     poolEnabled: pick('poolEnabled', DOUBAO_DEFAULTS.poolEnabled) === true,
     keepaliveEnabled: pick('keepaliveEnabled', DOUBAO_DEFAULTS.keepaliveEnabled) === true,
+    checkinEnabled: pick('checkinEnabled', DOUBAO_DEFAULTS.checkinEnabled) === true,
+    checkinHour: clampRange(pick('checkinHour', DOUBAO_DEFAULTS.checkinHour), 0, 23, DOUBAO_DEFAULTS.checkinHour),
+    checkinMinute: clampRange(pick('checkinMinute', DOUBAO_DEFAULTS.checkinMinute), 0, 59, DOUBAO_DEFAULTS.checkinMinute),
     // 后端选择：只认 cli / http，其余一律 auto（含空值与笔误）
     backend: normalizeBackend(raw.backend),
     cliPath: typeof raw.cliPath === 'string' ? raw.cliPath.trim() : '',

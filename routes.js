@@ -9,6 +9,7 @@
 export const PLUGIN_STATUS_PATH = '/plugins/dsh-connect-doubaowork/status'
 export const PLUGIN_SETUP_PATH = '/plugins/dsh-connect-doubaowork/setup'
 export const PLUGIN_KEEPALIVE_RUN_PATH = '/plugins/dsh-connect-doubaowork/keepalive/run'
+export const PLUGIN_CHECKIN_RUN_PATH = '/plugins/dsh-connect-doubaowork/checkin/run'
 export const PLUGIN_CLI_REFRESH_PATH = '/plugins/dsh-connect-doubaowork/cli/refresh'
 export const PLUGIN_LOGIN_START_PATH = '/plugins/dsh-connect-doubaowork/login/start'
 export const PLUGIN_LOGIN_POLL_PATH = '/plugins/dsh-connect-doubaowork/login/poll'
@@ -183,6 +184,29 @@ function registerAll(route, deps) {
       }
     },
   })
+
+  // 每日签到：设置卡片「立即签到」按钮（会真访问豆包一次，故仅 loopback + POST）
+  if (typeof deps.runCheckin === 'function') {
+    route({
+      kind: 'exact',
+      path: PLUGIN_CHECKIN_RUN_PATH,
+      handler: async (req, res) => {
+        if (req.method !== 'POST') {
+          json(res, 405, { error: 'method not allowed' })
+          return
+        }
+        if (!requireLoopback(req)) {
+          json(res, 403, { error: 'loopback only' })
+          return
+        }
+        try {
+          json(res, 200, await deps.runCheckin())
+        } catch (error) {
+          json(res, 500, { error: error?.message ?? String(error) })
+        }
+      },
+    })
+  }
 
   // CLI 状态刷新：设置卡片「重新探测 CLI」按钮用（会拉 --version / auth status 子进程）
   if (typeof deps.refreshCli === 'function') {

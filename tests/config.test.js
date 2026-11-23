@@ -44,6 +44,7 @@ test('createConfigSchema 字段种类与默认值', () => {
     'enabledModelIds', 'workMode', 'reasoningEffort', 'autoDiscoverCredentials',
     'credentialsFile', 'chatUrl', 'userAgent', 'timeoutSeconds', 'heartbeatSeconds', 'flattenHistory',
     'conversationMode', 'account', 'poolEnabled', 'keepaliveEnabled',
+    'checkinEnabled', 'checkinHour', 'checkinMinute',
     'backend', 'cliPath', 'cliWorkspace', 'cliPermissionMode', 'cliConcurrency', 'cliEffort',
     'conversationsFile',
   ])

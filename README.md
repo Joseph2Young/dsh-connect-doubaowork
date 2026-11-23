@@ -206,7 +206,10 @@ HTTP 后端需要豆包登录态；如果只用 CLI 后端（`backend: "cli"`）
 | `conversationMode` | `"single"` | 豆包侧会话归属：`single` = 全部复用同一条豆包会话（默认）；`per-chat` = 每个 DSH 会话一条豆包记录 |
 | `account` | 空 | 主账号快捷配置（`cookie` / `deviceId` / `webId`），优先级低于凭据文件 |
 | `poolEnabled` | `false` | 账号池故障转移：当前账号上游失败时自动换下一个账号重试（多账号时生效） |
-| `keepaliveEnabled` | `false` | 每日保活巡检：定时检查各账号 Cookie 是否仍被豆包接受（见下文） |
+| `keepaliveEnabled` | `false` | 每日保活巡检：定时检查各账号登录态是否仍有效（见下文） |
+| `checkinEnabled` | `false` | 每日自动签到：每天定时用登录态访问一次豆包（豆包免费积分按「当日首次登录」发放，见下文） |
+| `checkinHour` | `8` | 签到时刻（小时，0-23，本地时区） |
+| `checkinMinute` | `10` | 签到时刻（分钟，0-59） |
 | `backend` | `"auto"` | 上游后端：`auto`（CLI 可用且已登录就优先 CLI）/ `cli`（只用 CLI）/ `http`（只用 HTTP 抓包） |
 | `cliPath` | `""` | `doubao` 可执行文件路径，空 = 自动探测 npm 全局 bin、`~/.local/bin`、Homebrew、`PATH` |
 | `cliWorkspace` | `""` | CLI 任务工作目录（`-C`），空 = 用户主目录 |
@@ -223,7 +226,7 @@ HTTP 后端需要豆包登录态；如果只用 CLI 后端（`backend: "cli"`）
 
 卡片顶部还有「首次使用引导」区块（见上文），显示三步状态灯与修复命令，并提供「重新检查接入方式」按钮（`POST /plugins/dsh-connect-doubaowork/setup`）。
 
-卡片对配置采用「草稿-保存」模式：改动先落在草稿，点「保存设置」才写回；健康状态为只读测量值（由巡检写入 `~/.dsh-doubao/pool-state.json`）。老版本宿主不提供设置插槽时，卡片自动降级或隐藏，不影响网关本体。
+卡片对配置采用「草稿-保存」模式：改动先落在草稿，点「保存设置」才写回；健康状态为只读测量值（由巡检写入 `~/.dsh-doubao/pool-state.json`，签到写入 `~/.dsh-doubao/checkin-state.json`）。卡片里的「每日自动签到」区块可开关签到、设置时刻，并显示下一次触发时间、最近一次结果与逐账号状态，另有「立即签到」按钮（`POST /plugins/dsh-connect-doubaowork/checkin/run`）。老版本宿主不提供设置插槽时，卡片自动降级或隐藏，不影响网关本体。
 
 卡片上的区块顺序：首次使用引导 → 网关选项 → **当前生效（只读）** → 豆包 CLI（安装态/登录态/模型清单）→ **扫码登录** → 账号池 → 说明。
 
@@ -253,7 +256,29 @@ HTTP 后端需要豆包登录态；如果只用 CLI 后端（`backend: "cli"`）
 - **故障转移**：`poolEnabled: true` 且多账号时，当前账号在「上游请求失败 / HTTP 非 2xx」阶段自动换下一个账号重试（流式响应已开始后不再换号——响应头已发出无法回退）；成功账号被记住，后续请求优先；
 - **会话与账号绑定**：豆包 `conversation_id` 是账号作用域的，会话换账号时会自动重新建会话，不会把 A 账号的会话 id 发给 B 账号。
 
-**每日保活巡检**（对应 workbuddy 的自动签到）：豆包没有「签到」概念，落地为等价的**保活巡检**——每日固定时刻（默认 08:30）用每个账号的 Cookie 向豆包首页发起一次只读探测（`redirect: manual`，不产生会话记录），结果写入 `~/.dsh-doubao/pool-state.json` 并可在设置卡片查看。注意这是弱验证：它只能发现「Cookie 被服务端拒绝」，不能确认账号额度仍然可用；默认关闭（`keepaliveEnabled: true` 开启），设置卡片可手动「立即巡检」。
+**每日保活巡检**：每日固定时刻（默认 08:30）用每个账号的 Cookie 发一次登录态探针，结果写入 `~/.dsh-doubao/pool-state.json` 并可在设置卡片查看；默认关闭（`keepaliveEnabled: true` 开启），卡片可手动「立即巡检」。
+
+探针是 `POST https://www.doubao.com/samantha/user/preference/get`，判定只认 JSON 业务码：`code: 0` = 登录态有效，`code: 710012001` = 登录已过期。它总是返回 HTTP 200，所以**不看 HTTP 状态码**——早期实现是「带 Cookie `GET https://www.doubao.com/` 且要求 2xx」，但该 URL 无论 Cookie 有效与否都 302 到 `/chat/`，于是判定永远为假，卡片长期显示「账号池 异常（HTTP 302）」的误报。这个接口不是 chat 接口，不会在豆包侧产生会话记录。
+
+## 每日自动签到
+
+对应 workbuddy 的 auto-checkin，但豆包的机制完全不同：**豆包没有签到按钮，也没有签到接口**。
+
+它的积分规则写得很直白（`https://www.doubao.com/legal/credit/pc/rule`）：每日免费积分「获得方式：在移动端或PC端登录豆包」，「分端当日首次登录豆包可获得 80-150 幸运积分」，当日 24:00（北京时间）清零。也就是说「签到」这个动作在豆包侧就等于**当天用登录态真实访问一次**，积分自动到账。
+
+所以本插件的自动签到做的事是：每天固定时刻（默认 08:10，`checkinHour` / `checkinMinute` 可调）用每个账号的 Cookie：
+
+1. `GET https://www.doubao.com/chat/`——模拟「来豆包」这一次访问；
+2. `POST /samantha/user/preference/get`——确认登录态确实有效（同保活探针）。
+
+结果写入 `~/.dsh-doubao/checkin-state.json`（只有账号 id、天数、业务码、时间戳，**不含 Cookie**，权限 `0600`），设置卡片显示「开关 / 时刻 / 下一次触发 / 最近一次 / 今日结果（逐账号）」，并有「立即签到」按钮（走 force，点一次就真访问一次）。
+
+设计取舍：
+
+- **默认关闭**（`checkinEnabled: false`）：这是本插件唯一会主动发起上游请求的定时任务，不替用户做决定；
+- **失败会重试**：只有真的拿到 `code: 0` 才写「今日已签」，上一轮失败下一轮仍会跑；
+- **不产生会话记录**：两个请求都不是 chat 接口，签到本身不会在豆包客户端留下对话；
+- **不解析积分余额**：豆包没有公开的积分查询接口，插件无法报告「今天到账多少」。要核对请在豆包 App 的【我的】→ 积分明细里看。
 
 ## 关于豆包侧的会话记录
 
@@ -326,6 +351,7 @@ HTTP 后端需要豆包登录态；如果只用 CLI 后端（`backend: "cli"`）
 | 目标 | 何时 | 内容 |
 | --- | --- | --- |
 | `https://www.doubao.com/chat/completion` | 使用 HTTP 后端时 | 你的对话内容 + Cookie（本地读取，不写日志） |
+| `https://www.doubao.com/chat/` 与 `/samantha/user/preference/get` | 每日签到 / 保活巡检触发时 | 仅 Cookie，无对话内容 |
 | 本机 `doubao` 子进程 | 使用 CLI 后端时 | 你的对话内容（经 stdin/argv 传给 CLI，由 CLI 自己联网） |
 
 本地读取（只读，限于取得登录态）：
@@ -336,7 +362,8 @@ HTTP 后端需要豆包登录态；如果只用 CLI 后端（`backend: "cli"`）
 
 本插件会写的文件（都在用户目录，不进仓库）：
 
-- `~/.dsh-doubao/pool-state.json`——账号探测结果（只有 HTTP 状态码、时间戳、账号 id，**不含 Cookie**）
+- `~/.dsh-doubao/pool-state.json`——保活巡检结果（只有业务码、HTTP 状态码、时间戳、账号 id，**不含 Cookie**）
+- `~/.dsh-doubao/checkin-state.json`——签到结果（只有账号 id、日期、业务码、时间戳，**不含 Cookie、不含对话内容**；权限 `0600`）
 - `~/.dsh-doubao/conversations.json`——会话绑定（只有豆包会话 id、账号 id、时间戳，**不含对话内容、不含 Cookie**；权限 `0600`）
 
 日志脱敏约定：插件在任何日志、错误信息、引导输出里**都不打印 Cookie、token、device_id 的实际取值**；引导只报告「有无 / 能否解析 / 账号数」这类形状信息，并有专门的回归用例（`tests/onboarding.test.js` 的「summary 不含任何凭据内容」）守护。
@@ -358,7 +385,7 @@ HTTP 后端需要豆包登录态；如果只用 CLI 后端（`backend: "cli"`）
 node --test "tests/*.test.js"
 ```
 
-188 个用例，覆盖协议解析、网关、账号池、保活巡检、CLI 后端（NDJSON 事件、串行队列、探测、超时/取消）、扫码登录、插件路由、模型目录二选一、会话绑定持久化（含跨进程复用与失效重建）与设置卡片渲染。
+212 个用例，覆盖协议解析、网关、账号池、保活巡检（业务码判定）、每日签到（幂等/重试/隐私回归）、CLI 后端（NDJSON 事件、串行队列、探测、超时/取消）、扫码登录、插件路由、模型目录二选一、会话绑定持久化（含跨进程复用与失效重建）与设置卡片渲染。
 
 - CLI 与登录相关用例全部用假子进程（`EventEmitter` + `Readable`）驱动，不依赖本机是否装了豆包 CLI；
 - `tests/onboarding.test.js`（14 例）覆盖首次引导的三态与隐私回归；

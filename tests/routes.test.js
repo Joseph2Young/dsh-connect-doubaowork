@@ -6,6 +6,7 @@ import {
   PLUGIN_STATUS_PATH,
   PLUGIN_SETUP_PATH,
   PLUGIN_KEEPALIVE_RUN_PATH,
+  PLUGIN_CHECKIN_RUN_PATH,
   PLUGIN_CLI_REFRESH_PATH,
   PLUGIN_LOGIN_START_PATH,
   PLUGIN_LOGIN_POLL_PATH,
@@ -92,6 +93,7 @@ const findRoute = (routes, path) => routes.find(entry => entry.path === path)
 const makeDeps = () => ({
   status: () => ({ ok: 1 }),
   runKeepalive: async () => ({ ok: true }),
+  runCheckin: async () => ({ ok: true }),
   refreshCli: async () => ({ available: false }),
   refreshSetup: async () => ({ ready: false }),
   login: { start: async () => ({ ok: true }), poll: async () => ({ done: false }), cancel: () => ({ ok: true }) },
@@ -244,18 +246,49 @@ test('routes：登录 cancel 调 deps.login.cancel', async () => {
   assert.equal(cancelled, 1)
 })
 
-test('routes：四个既有能力路由都注册（status/setup/keepalive/cli）', () => {
+test('routes：既有能力路由都注册（status/setup/keepalive/checkin/cli）', () => {
   const { ctx, routes } = makeFakeCtx()
   registerPluginRoutes(ctx, {
     status: () => ({}),
     runKeepalive: async () => ({}),
+    runCheckin: async () => ({}),
     refreshCli: async () => ({}),
     refreshSetup: async () => ({}),
   })
   assert.ok(findRoute(routes, PLUGIN_STATUS_PATH))
   assert.ok(findRoute(routes, PLUGIN_SETUP_PATH))
   assert.ok(findRoute(routes, PLUGIN_KEEPALIVE_RUN_PATH))
+  assert.ok(findRoute(routes, PLUGIN_CHECKIN_RUN_PATH))
   assert.ok(findRoute(routes, PLUGIN_CLI_REFRESH_PATH))
+})
+
+test('routes：签到路由的闸门（方法/loopback）与返回体', async () => {
+  const { ctx, routes } = makeFakeCtx()
+  registerPluginRoutes(ctx, { status: () => ({}), runCheckin: async () => ({ signedCount: 1 }) })
+  const route = findRoute(routes, PLUGIN_CHECKIN_RUN_PATH)
+  assert.ok(route)
+
+  // GET 被拒
+  const getRes = makeRes()
+  await route.handler(makeReq({ method: 'GET' }), getRes)
+  assert.equal(getRes.status, 405)
+
+  // 非 loopback 被拒
+  const remoteRes = makeRes()
+  await route.handler(makeReq({ method: 'POST', remote: '10.0.0.5' }), remoteRes)
+  assert.equal(remoteRes.status, 403)
+
+  // 正常 POST 返回 handler 结果
+  const okRes = makeRes()
+  await route.handler(makeReq({ method: 'POST' }), okRes)
+  assert.equal(okRes.status, 200)
+  assert.match(String(okRes.body), /"signedCount":1/)
+})
+
+test('routes：runCheckin 未提供时不注册签到路由（不给会失败的按钮）', () => {
+  const { ctx, routes } = makeFakeCtx()
+  registerPluginRoutes(ctx, { status: () => ({}) })
+  assert.equal(findRoute(routes, PLUGIN_CHECKIN_RUN_PATH), undefined)
 })
 
 test('routes：卸载函数把注册的每条路由都 dispose 掉', () => {
@@ -343,7 +376,7 @@ test('routes：webServer 上下文带 effect 时，通过 effect 管理路由生
     inject: (names, callback) => callback(webCtx),
   }
   const dispose = registerPluginRoutes(ctx, makeDeps())
-  assert.equal(routes.length, 7, '七条路由都该登记')
+  assert.equal(routes.length, 8, '八条路由都该登记（status/setup/keepalive/checkin/cli/login×3）')
   assert.match(effectLabel, /dsh-connect-doubaowork/, 'effect 应带可读标签便于宿主排查')
   assert.equal(typeof cleanups[0], 'function', 'effect 回调要返回注销函数')
   dispose()

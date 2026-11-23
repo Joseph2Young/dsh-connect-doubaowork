@@ -26,6 +26,7 @@ window.__ModuleLoader__.load({
     const KEEPALIVE_RUN_PATH = '/plugins/dsh-connect-doubaowork/keepalive/run'
     const CLI_REFRESH_PATH = '/plugins/dsh-connect-doubaowork/cli/refresh'
     const SETUP_PATH = '/plugins/dsh-connect-doubaowork/setup'
+    const CHECKIN_RUN_PATH = '/plugins/dsh-connect-doubaowork/checkin/run'
     const LOGIN_START_PATH = '/plugins/dsh-connect-doubaowork/login/start'
     const LOGIN_POLL_PATH = '/plugins/dsh-connect-doubaowork/login/poll'
     const LOGIN_CANCEL_PATH = '/plugins/dsh-connect-doubaowork/login/cancel'
@@ -67,6 +68,24 @@ window.__ModuleLoader__.load({
         'effective.models': '当前可路由模型',
         'effective.default': '默认模型',
         'effective.noModels': '（暂无；CLI 需先登录才会拉取清单）',
+        'group.checkin': '每日自动签到',
+        'checkin.enabled': '每日签到',
+        'checkin.enabled.on': '已开启',
+        'checkin.enabled.off': '已关闭',
+        'checkin.time': '签到时刻',
+        'checkin.next': '下一次',
+        'checkin.next.none': '未启用',
+        'checkin.last': '最近一次',
+        'checkin.last.none': '还没跑过',
+        'checkin.result': '今日结果',
+        'checkin.result.value': '成功 %s 个账号',
+        'checkin.result.skipped': '已跳过 %s 个（今日已签）',
+        'checkin.account.ok': '登录态有效',
+        'checkin.account.fail': '未签到',
+        'checkin.account.pending': '未检查',
+        'action.checkin': '立即签到',
+        'action.checkingIn': '签到中…',
+        'checkin.hint': '豆包没有签到按钮：免费积分按「当日首次登录」发放（80-150 积分，当日 24:00 清零）。这里的签到就是每天定时用登录态真实访问一次豆包，顺带确认登录态是否还有效。',
         'group.trace': '豆包侧的留痕',
         'trace.mode': '会话复用模式',
         'trace.mode.single': '固定复用同一条豆包会话（推荐，留痕最少）',
@@ -161,6 +180,24 @@ window.__ModuleLoader__.load({
         'effective.models': 'Routable models',
         'effective.default': 'Default model',
         'effective.noModels': '(none yet; the CLI list appears after sign-in)',
+        'group.checkin': 'Daily auto check-in',
+        'checkin.enabled': 'Daily check-in',
+        'checkin.enabled.on': 'On',
+        'checkin.enabled.off': 'Off',
+        'checkin.time': 'Check-in time',
+        'checkin.next': 'Next run',
+        'checkin.next.none': 'Not scheduled',
+        'checkin.last': 'Last run',
+        'checkin.last.none': 'Never',
+        'checkin.result': "Today's result",
+        'checkin.result.value': '%s account(s) signed',
+        'checkin.result.skipped': '%s skipped (already today)',
+        'checkin.account.ok': 'Signed in',
+        'checkin.account.fail': 'Not signed',
+        'checkin.account.pending': 'Not checked',
+        'action.checkin': 'Check in now',
+        'action.checkingIn': 'Checking in…',
+        'checkin.hint': 'Doubao has no check-in button: the free credits are granted on the first login of the day (80-150 credits, expiring at 24:00 Beijing time). This check-in simply visits Doubao once a day with your login state, which also verifies that the cookie still works.',
         'group.trace': 'Traces on the Doubao side',
         'trace.mode': 'Conversation reuse',
         'trace.mode.single': 'Reuse one Doubao conversation (recommended, fewest traces)',
@@ -219,6 +256,7 @@ window.__ModuleLoader__.load({
       const [status, setStatus] = react.useState(null)
       const [statusError, setStatusError] = react.useState(false)
       const [probing, setProbing] = react.useState(false)
+      const [checkingIn, setCheckingIn] = react.useState(false)
       const [refreshing, setRefreshing] = react.useState(false)
       const [checking, setChecking] = react.useState(false)
       // 扫码登录本地状态机：idle → starting → waiting → success | error
@@ -244,6 +282,7 @@ window.__ModuleLoader__.load({
         for (const key of [
           'backend', 'conversationMode', 'workMode', 'flattenHistory', 'reasoningEffort', 'timeoutSeconds',
           'poolEnabled', 'keepaliveEnabled', 'cliPath', 'cliWorkspace', 'cliPermissionMode', 'cliEffort',
+          'checkinEnabled', 'checkinHour', 'checkinMinute',
         ]) {
           if (draft[key] !== undefined && draft[key] !== config[key]) {
             try {
@@ -288,6 +327,27 @@ window.__ModuleLoader__.load({
           }
         } catch {} finally {
           setRefreshing(false)
+        }
+      }
+
+      /**
+       * 立即签到：POST /checkin/run。Host 侧是 force 模式（忽略「今日已签」去重），
+       * 所以按钮点一次就真的访问一次豆包——这也是用户手动验证登录态的手段。
+       * 返回的是新的 pending state，随后整份 status 重拉以刷新「今日结果」。
+       */
+      const checkinNow = async () => {
+        setCheckingIn(true)
+        try {
+          const response = await fetch(CHECKIN_RUN_PATH, { method: 'POST', headers: { accept: 'application/json' } })
+          if (response.ok) {
+            const snapshot = await fetch(STATUS_PATH, { headers: { accept: 'application/json' } })
+            if (snapshot.ok) {
+              setStatus(await snapshot.json())
+              setStatusError(false)
+            }
+          }
+        } catch {} finally {
+          setCheckingIn(false)
         }
       }
 
@@ -587,6 +647,79 @@ window.__ModuleLoader__.load({
             persisted ? t('trace.persisted.yes').replace('%s', String(status.conversations?.file ?? '')) : t('trace.persisted.no')),
         ))
         rows.push(h('div', { key: 'gt4', style: { opacity: 0.75, fontSize: '0.82em', marginTop: '0.35em' } }, t('trace.hint')))
+      }
+
+      // —— 每日自动签到 ——
+      // 豆包没有签到按钮：免费积分按「当日首次登录」发放。这里把「开关 + 时刻 +
+      // 今日结果」摊开，并提供手动按钮（Host 侧走 force，点一次就真访问一次）。
+      rows.push(h('div', { key: 'gk', style: sectionTitle }, t('group.checkin')))
+      if (settingsScope !== undefined) {
+        rows.push(h('div', { key: 'ck1', style: rowStyle },
+          h('label', { style: labelStyle }, t('checkin.enabled')),
+          h('select', {
+            style: inputStyle,
+            value: value.checkinEnabled === true ? 'on' : 'off',
+            onChange: event => setField('checkinEnabled', event.target.value === 'on'),
+          },
+          h('option', { value: 'off' }, t('checkin.enabled.off')),
+          h('option', { value: 'on' }, t('checkin.enabled.on')))),
+        )
+        rows.push(h('div', { key: 'ck2', style: rowStyle },
+          h('label', { style: labelStyle }, t('checkin.time')),
+          h('input', {
+            style: inputStyle,
+            type: 'time',
+            value: `${String(value.checkinHour ?? 8).padStart(2, '0')}:${String(value.checkinMinute ?? 10).padStart(2, '0')}`,
+            onChange: event => {
+              const [hour, minute] = String(event.target.value ?? '').split(':')
+              const h2 = Number(hour)
+              const m2 = Number(minute)
+              if (Number.isInteger(h2) && h2 >= 0 && h2 <= 23) setField('checkinHour', h2)
+              if (Number.isInteger(m2) && m2 >= 0 && m2 <= 59) setField('checkinMinute', m2)
+            },
+          })),
+        )
+      }
+
+      const checkin = status?.checkin
+      if (status === null || status === undefined) {
+        rows.push(h('div', { key: 'cku', style: { opacity: 0.7, fontSize: '0.88em' } }, statusError ? t('error.fetch') : t('cli.unknown')))
+      } else if (checkin === undefined || checkin === null) {
+        rows.push(h('div', { key: 'cku', style: { opacity: 0.7, fontSize: '0.88em' } }, t('cli.unknown')))
+      } else {
+        rows.push(h('div', { key: 'ck3', style: rowStyle },
+          h('span', null, t('checkin.next')),
+          h('span', { style: { fontSize: '0.85em', opacity: 0.85 } },
+            typeof checkin.nextRunAt === 'string' && checkin.nextRunAt !== ''
+              ? new Date(checkin.nextRunAt).toLocaleString()
+              : t('checkin.next.none')),
+        ))
+        rows.push(h('div', { key: 'ck4', style: rowStyle },
+          h('span', null, t('checkin.last')),
+          h('span', { style: { fontSize: '0.85em', opacity: 0.85 } },
+            typeof checkin.lastRun === 'string' && checkin.lastRun !== ''
+              ? `${new Date(checkin.lastRun).toLocaleString()}${checkin.lastDay ? `（${checkin.lastDay}）` : ''}`
+              : t('checkin.last.none')),
+        ))
+        rows.push(h('div', { key: 'ck5', style: rowStyle },
+          h('span', null, t('checkin.result')),
+          h('span', { style: { fontSize: '0.85em', opacity: 0.85 } },
+            `${t('checkin.result.value').replace('%s', String(checkin.signedCount ?? 0))}${Number(checkin.skipped ?? 0) > 0 ? `，${t('checkin.result.skipped').replace('%s', String(checkin.skipped))}` : ''}`),
+        ))
+        const perAccount = Array.isArray(checkin.accounts) ? checkin.accounts : []
+        for (const entry of perAccount) {
+          const state = entry.ok === true
+            ? t('checkin.account.ok')
+            : entry.ok === false
+              ? `${t('checkin.account.fail')}${entry.code !== null && entry.code !== undefined && entry.code !== 0 ? `（业务码 ${entry.code}）` : ''}`
+              : t('checkin.account.pending')
+          rows.push(h('div', { key: `ck-${entry.id}`, style: { padding: '4px 0 4px 10px', fontSize: '0.88em', opacity: 0.9 } },
+            `${entry.id}：${state}${entry.day ? `（${entry.day}）` : ''}`))
+        }
+        rows.push(h('div', { key: 'ck6', style: rowStyle },
+          h('button', { type: 'button', disabled: checkingIn, onClick: checkinNow },
+            checkingIn ? t('action.checkingIn') : t('action.checkin'))))
+        rows.push(h('div', { key: 'ck7', style: { opacity: 0.75, fontSize: '0.82em', marginTop: '0.35em' } }, t('checkin.hint')))
       }
 
       // —— CLI 探测状态（只读测量值 + 手动重新探测）——

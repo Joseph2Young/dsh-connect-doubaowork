@@ -466,3 +466,69 @@ test('client bundle：未落盘时提示重载会新开一条豆包会话', asyn
   assert.match(flat, /每个对话各一条豆包会话/)
   assert.match(flat, /仅内存（重载插件会丢，豆包侧会新开一条）/)
 })
+
+test('client bundle：签到区块展示开关/时刻/下次触发/逐账号结果', async () => {
+  const flat = await renderCardWithStatus({
+    effectiveBackend: 'http',
+    models: ['auto'],
+    defaultModel: 'auto',
+    checkin: {
+      enabled: true,
+      hour: 8,
+      minute: 10,
+      nextRunAt: '2026-11-24T00:10:00.000Z',
+      lastRun: '2026-11-23T00:10:03.000Z',
+      lastDay: '2026-11-23',
+      signedCount: 1,
+      skipped: 0,
+      accounts: [{ id: 'account-1', ok: true, day: '2026-11-23' }],
+    },
+    cli: { installed: false, version: '', loggedIn: false, models: [] },
+  })
+  assert.match(flat, /每日自动签到/)
+  assert.match(flat, /签到时刻/)
+  assert.match(flat, /下一次/)
+  assert.match(flat, /最近一次/)
+  assert.match(flat, /成功 1 个账号/)
+  assert.match(flat, /account-1：登录态有效/)
+  assert.match(flat, /立即签到/)
+  // 关键告知：豆包没有签到按钮，积分按当日首次登录发放
+  assert.match(flat, /没有签到按钮/)
+  assert.match(flat, /当日首次登录/)
+})
+
+test('client bundle：签到未启用时显示未排程，失效账号带业务码', async () => {
+  const flat = await renderCardWithStatus({
+    effectiveBackend: 'http',
+    models: ['auto'],
+    defaultModel: 'auto',
+    checkin: {
+      enabled: false,
+      hour: 8,
+      minute: 10,
+      nextRunAt: null,
+      lastRun: null,
+      lastDay: null,
+      signedCount: 0,
+      skipped: 0,
+      accounts: [{ id: 'account-1', ok: false, day: '2026-11-23', code: 710012001 }],
+    },
+    cli: { installed: false, version: '', loggedIn: false, models: [] },
+  })
+  assert.match(flat, /未启用/)
+  assert.match(flat, /还没跑过/)
+  assert.match(flat, /成功 0 个账号/)
+  assert.match(flat, /account-1：未签到（业务码 710012001）/)
+})
+
+test('client bundle：status.checkin 缺席时签到只读行降级为未知而不是崩', async () => {
+  const flat = await renderCardWithStatus({
+    effectiveBackend: 'http',
+    models: ['auto'],
+    defaultModel: 'auto',
+    cli: { installed: false, version: '', loggedIn: false, models: [] },
+  })
+  // 区块标题在（表单区仍可编辑开关），只读行提示未知
+  assert.match(flat, /每日自动签到/)
+  assert.ok(!flat.includes('NaN'))
+})

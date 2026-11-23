@@ -28,28 +28,57 @@ test('nextRunDelay：今天未到 → 今天；已过 → 明天', () => {
   assert.equal(nextRunDelay(exact, 8, 30), 24 * 60 * 60 * 1000)
 })
 
-test('probeAccount：2xx 健康 / 302 失效 / 网络错误', async () => {
-  const ok = await probeAccount({ cookie: 'sessionid=a' }, { fetchImpl: async () => ({ status: 200 }) })
+test('probeAccount：按业务码判定登录态（不看 HTTP 状态码）', async () => {
+  // 登录态有效：HTTP 200 + code 0
+  const ok = await probeAccount({ cookie: 'sessionid=a' }, {
+    fetchImpl: async () => ({ status: 200, text: async () => JSON.stringify({ code: 0, data: {} }) }),
+  })
   assert.equal(ok.ok, true)
+  assert.equal(ok.loggedIn, true)
+  assert.equal(ok.code, 0)
   assert.equal(ok.status, 200)
-  const expired = await probeAccount({ cookie: 'sessionid=a' }, { fetchImpl: async () => ({ status: 302 }) })
+
+  // 登录已过期：HTTP 仍 200，业务码 710012001
+  const expired = await probeAccount({ cookie: 'sessionid=a' }, {
+    fetchImpl: async () => ({ status: 200, text: async () => JSON.stringify({ code: 710012001, msg: '登录已过期，请重新登录' }) }),
+  })
   assert.equal(expired.ok, false)
-  assert.equal(expired.status, 302)
+  assert.equal(expired.loggedIn, false)
+  assert.equal(expired.code, 710012001)
+
+  // 即使 HTTP 非 200，只要业务码是 0 也算有效（判定与状态码解耦）
+  const oddStatus = await probeAccount({ cookie: 'sessionid=a' }, {
+    fetchImpl: async () => ({ status: 302, text: async () => JSON.stringify({ code: 0 }) }),
+  })
+  assert.equal(oddStatus.ok, true)
+
   const network = await probeAccount({ cookie: 'sessionid=a' }, { fetchImpl: async () => { throw new Error('ECONNREFUSED') } })
   assert.equal(network.ok, false)
   assert.equal(network.status, 0)
   assert.match(network.detail, /ECONNREFUSED/)
-  // 请求带 cookie + 手动 redirect
+
+  // 请求形态：POST 探针接口、带 cookie、手动 redirect
   let captured
   await probeAccount({ cookie: 'sessionid=probe' }, {
     fetchImpl: async (url, init) => {
       captured = { url, init }
-      return { status: 200 }
+      return { status: 200, text: async () => JSON.stringify({ code: 0 }) }
     },
   })
-  assert.equal(captured.url, 'https://www.doubao.com/')
+  assert.equal(captured.url, 'https://www.doubao.com/samantha/user/preference/get')
+  assert.equal(captured.init.method, 'POST')
   assert.equal(captured.init.redirect, 'manual')
   assert.match(captured.init.headers.Cookie, /sessionid=probe/)
+})
+
+test('probeAccount 回归：首页 302 不再被误判为登录失效', async () => {
+  // 早期实现 GET 首页并判定 2xx，但首页无论 cookie 是否有效都 302 → 长期误报。
+  // 现在探针是 preference 接口，业务码 0 即有效，与首页重定向无关。
+  const result = await probeAccount({ cookie: 'sessionid=a' }, {
+    fetchImpl: async () => ({ status: 200, text: async () => JSON.stringify({ code: 0 }) }),
+  })
+  assert.equal(result.ok, true)
+  assert.doesNotMatch(JSON.stringify(result), /302/)
 })
 
 test('runNow：逐账号巡检并落盘；失败账号记录非 ok', async () => {
@@ -61,7 +90,10 @@ test('runNow：逐账号巡检并落盘；失败账号记录非 ok', async () =>
       { id: 'bad', cookie: 'sessionid=2' },
       { id: 'off', cookie: 'sessionid=3', enabled: false },
     ],
-    fetchImpl: async (url, init) => (init.headers.Cookie.includes('sessionid=1') ? { status: 200 } : { status: 403 }),
+    fetchImpl: async (url, init) => ({
+      status: 200,
+      text: async () => JSON.stringify(init.headers.Cookie.includes('sessionid=1') ? { code: 0 } : { code: 710012001 }),
+    }),
     statePath,
     log: level => warnings.push(level),
   })
@@ -84,7 +116,7 @@ test('runNow：巡检中幂等（不并发）', async () => {
     accounts: () => [{ id: 'a', cookie: 'sessionid=1' }],
     fetchImpl: async () => {
       await gate
-      return { status: 200 }
+      return { status: 200, text: async () => JSON.stringify({ code: 0 }) }
     },
     statePath,
   })
