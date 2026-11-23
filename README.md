@@ -28,12 +28,17 @@ DSH 宿主 ──pi-ai──▶ 本地回环网关 ──┤   （构造工作�
 | `cli-backend.js` | 豆包 CLI 子进程桥：NDJSON 事件解析、串行任务队列、探测与模型清单 |
 | `doubao-protocol.js` | 工作模式请求体构造与 SSE 事件泵（正文增量 / 思考标题 / 会话 ack / 收尾） |
 | `adapter.js` | `createProvider` + `openAICompletionsApi` + `PiAiAdapter` 装配 |
-| `catalog.js` | 模型目录（静态 10 个 + CLI 动态清单合并，含别名） |
+| `catalog.js` | 模型目录：按生效后端二选一（CLI 只列 CLI 实报、HTTP 只列静态 10 个），含别名与友好 id 翻译 |
 | `credentials.js` | 豆包登录态加载（手动导入 / 桌面端自动发现） |
 | `login.js` | 扫码登录：拉起 `doubao login --qr=png`、读二维码 PNG 转 data URL、轮询登录态、取消与进程回收 |
 | `onboarding.js` | 首次使用引导：探测接入方式、生成修复步骤（只读、无凭据输出） |
 | `config.js` | 配置 schema 与默认常量 |
-| `plugin.js` | 宿主注册编排（adapter → 目录 → discovery，含失败回收） |
+| `plugin.js` | 宿主注册编排（adapter → 目录 → discovery，含失败回收）+ settings 命名空间绑定 |
+| `conversation-store.js` | 会话绑定的落盘存储（只存会话 id，0600 原子写，损坏降级为纯内存） |
+| `keepalive.js` | 每日保活巡检：业务码探针 + `~/.dsh-doubao/pool-state.json` |
+| `checkin.js` | 每日自动签到：真实访问豆包触发「当日首次登录」积分，含幂等与状态落盘 |
+| `routes.js` | 主进程 HTTP 路由（status / setup / keepalive / checkin / cli / login 三件套），响应式挂载 webServer |
+| `client.js` | 设置卡片（零构建）：页头徽章 + 五个面板 tab + 注入式样式表 |
 
 ## 支持的模型
 
@@ -228,7 +233,17 @@ HTTP 后端需要豆包登录态；如果只用 CLI 后端（`backend: "cli"`）
 
 卡片对配置采用「草稿-保存」模式：改动先落在草稿，点「保存设置」才写回；健康状态为只读测量值（由巡检写入 `~/.dsh-doubao/pool-state.json`，签到写入 `~/.dsh-doubao/checkin-state.json`）。卡片里的「每日自动签到」区块可开关签到、设置时刻，并显示下一次触发时间、最近一次结果与逐账号状态，另有「立即签到」按钮（`POST /plugins/dsh-connect-doubaowork/checkin/run`）。老版本宿主不提供设置插槽时，卡片自动降级或隐藏，不影响网关本体。
 
-卡片上的区块顺序：首次使用引导 → 网关选项 → **当前生效（只读）** → 豆包 CLI（安装态/登录态/模型清单）→ **扫码登录** → 账号池 → 说明。
+卡片布局（0.8.0 起重做）：**页头**（标题 + 右侧状态徽章：当前生效后端、CLI 版本/登录态）+ **面板 tab 栏**（概览 / 网关 / 模型 / 账号 / 诊断）+ 底部保存条。五个面板：
+
+| 面板 | 内容 |
+| --- | --- |
+| 概览 | 首次使用引导（三步状态灯 + 修复命令）+ 当前生效（后端、可路由模型清单、默认模型） |
+| 网关 | 会话归属、思考强度、上游超时 + 工作模式 / 压平历史 / 账号池故障转移 / 每日保活巡检四个开关 |
+| 模型 | 上游后端（auto/cli/http）、CLI 路径与工作目录、CLI 权限模式与推理强度 + CLI 探测（安装态/登录态/模型清单 + 重新探测） |
+| 账号 | 扫码登录豆包 CLI（二维码 + 倒计时 + 取消）+ 账号池健康表格 + 每日自动签到（开关 + 时刻 + 下次/最近/逐账号结果 + 立即签到） |
+| 诊断 | 豆包侧的留痕（复用模式、绑定条数、是否落盘）+ 说明 |
+
+面板用 `hidden` 属性保持挂载：切走再切回**不会重拉数据**，半填的草稿也不会丢。样式全部走 `--dsw-alias-*` 主题变量（带十六进制回退），深浅色主题自动适配；样式表由模块顶层注入 `<style data-plugin-css="dsh-connect-doubaowork/client.css">` 并去重，所以本插件仍然**零构建**——不产出独立 CSS 文件，也不需要打包器认识 CSS。
 
 「当前生效」区块直接显示 `status.effectiveBackend` 与 `status.models`：宿主侧按生效后端选好一份清单，卡片只展示这一份，所以你在 CLI 后端看到的模型列表与 HTTP 后端看到的不会混。改 `backend` 下拉框并保存后，该区块无需重启就跟着变（volatile 字段就地更新）。
 
@@ -385,7 +400,7 @@ HTTP 后端需要豆包登录态；如果只用 CLI 后端（`backend: "cli"`）
 node --test "tests/*.test.js"
 ```
 
-212 个用例，覆盖协议解析、网关、账号池、保活巡检（业务码判定）、每日签到（幂等/重试/隐私回归）、CLI 后端（NDJSON 事件、串行队列、探测、超时/取消）、扫码登录、插件路由、模型目录二选一、会话绑定持久化（含跨进程复用与失效重建）与设置卡片渲染。
+214 个用例，覆盖协议解析、网关、账号池、保活巡检（业务码判定）、每日签到（幂等/重试/隐私回归）、CLI 后端（NDJSON 事件、串行队列、探测、超时/取消）、扫码登录、插件路由、模型目录二选一、会话绑定持久化（含跨进程复用与失效重建）与设置卡片渲染。
 
 - CLI 与登录相关用例全部用假子进程（`EventEmitter` + `Readable`）驱动，不依赖本机是否装了豆包 CLI；
 - `tests/onboarding.test.js`（14 例）覆盖首次引导的三态与隐私回归；

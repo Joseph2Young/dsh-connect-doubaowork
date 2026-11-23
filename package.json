@@ -1,7 +1,7 @@
 {
   "name": "dsh-connect-doubaowork",
-  "version": "0.7.0",
-  "description": "DSH 插件：复用豆包桌面端「工作模式」登录态，把豆包聚合的模型（豆包 / DeepSeek / Kimi / GLM）以本机 OpenAI 兼容网关的形式接入 DSH",
+  "version": "0.8.0",
+  "description": "DSH \u63d2\u4ef6\uff1a\u590d\u7528\u8c46\u5305\u684c\u9762\u7aef\u300c\u5de5\u4f5c\u6a21\u5f0f\u300d\u767b\u5f55\u6001\uff0c\u628a\u8c46\u5305\u805a\u5408\u7684\u6a21\u578b\uff08\u8c46\u5305 / DeepSeek / Kimi / GLM\uff09\u4ee5\u672c\u673a OpenAI \u517c\u5bb9\u7f51\u5173\u7684\u5f62\u5f0f\u63a5\u5165 DSH",
   "type": "module",
   "main": "index.js",
   "exports": {

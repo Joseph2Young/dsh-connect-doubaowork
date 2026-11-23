@@ -532,3 +532,65 @@ test('client bundle：status.checkin 缺席时签到只读行降级为未知而�
   assert.match(flat, /每日自动签到/)
   assert.ok(!flat.includes('NaN'))
 })
+
+test('client bundle：卡片是「页头 + 面板 tab + 五个面板」结构（0.8.0 视觉重做）', () => {
+  const { exports } = loadClientBundle()
+  const { ctx, slotRegistrations } = makeFakeCtx()
+  exports.apply(ctx)
+  const section = slotRegistrations.find(entry => entry.entry?.name === 'settings.section')
+  const tree = section.component(section.entry.inject())
+
+  // 收集全树的 className 集合，确认容器与 tab 栏都用了 CSS 类而不是内联样式
+  const classes = new Set()
+  const walkNode = node => {
+    if (node === null || node === undefined || typeof node !== 'object') return
+    if (typeof node.props?.className === 'string') {
+      for (const cls of node.props.className.split(' ')) if (cls !== '') classes.add(cls)
+    }
+    for (const child of Array.isArray(node.children) ? node.children : []) walkNode(child)
+  }
+  walkNode(tree)
+  assert.ok(classes.has('dsm-doubaowork-card'), '根容器要有卡片类名')
+  assert.ok(classes.has('dsm-doubaowork-panels'), '要有面板 tab 栏')
+  assert.ok(classes.has('dsm-doubaowork-panel-tab-active'), '默认要有一个激活的 tab')
+
+  // 五个面板都必须挂载（hidden 只隐藏不卸载，切回去不重拉数据）
+  const panels = []
+  const collectPanels = node => {
+    if (node === null || node === undefined || typeof node !== 'object') return
+    if (typeof node.props?.className === 'string' && node.props.className.split(' ').includes('dsm-doubaowork-panel')) panels.push(node)
+    for (const child of Array.isArray(node.children) ? node.children : []) collectPanels(child)
+  }
+  collectPanels(tree)
+  assert.equal(panels.length, 5, '概览/网关/模型/账号/诊断五个面板都要在树上')
+  const visible = panels.filter(panel => panel.props.hidden !== true)
+  assert.equal(visible.length, 1, '同一时刻只应有一个面板可见')
+})
+
+test('client bundle：模板字面量样式表被注入到 <head> 且带 data-plugin-css 去重键', () => {
+  // 用假 document 再加载一次 bundle，断言注入行为（真实宿主里 document 一定存在）
+  const injected = []
+  const fakeDocument = {
+    querySelector: () => null,
+    createElement: () => {
+      const node = { dataset: {}, textContent: '' }
+      injected.push(node)
+      return node
+    },
+    head: { appendChild: () => {} },
+  }
+  const originalDocument = globalThis.document
+  globalThis.document = fakeDocument
+  try {
+    loadClientBundle()
+  } finally {
+    if (originalDocument === undefined) delete globalThis.document
+    else globalThis.document = originalDocument
+  }
+  assert.equal(injected.length, 1, '应注入一个 <style>')
+  const styleTag = injected[0]
+  assert.equal(styleTag.dataset.pluginCss, 'dsh-connect-doubaowork/client.css')
+  assert.match(styleTag.textContent, /\.dsm-doubaowork-card\{/)
+  // 面板 hidden 必须带 !important，否则类选择器的 display 会压过 UA 的 [hidden]
+  assert.match(styleTag.textContent, /\.dsm-doubaowork-panel\[hidden\]\{display:none!important\}/)
+})

@@ -33,11 +33,249 @@ window.__ModuleLoader__.load({
     /** 登录轮询节奏：1.5s 一轮，扫码成功后最迟这么久就能反馈（对齐 workbuddy 的做法）。 */
     const LOGIN_POLL_INTERVAL_MS = 1500
 
+    /**
+     * 卡片样式表。
+     *
+     * 与 dsh-connect-workbuddy 同构：颜色走宿主 --dsw-alias-* 主题变量并带十六进制
+     * 回退（深浅色主题自动适配），尺寸走统一竖向节奏。用 <style> + data-plugin-css
+     * 注入到 <head> 并去重，因此本插件仍然零构建：不产出 CSS 文件，也不需要打包器
+     * 认识 CSS。
+     *
+     * `typeof document` 守卫是必须的：客户端单测在无 DOM 的假宿主里加载本 bundle。
+     */
+    const CARD_CSS = `/* ---------------------------------------------------------------------------
+ * 豆包工作模式设置卡片样式。
+ *
+ * 与 dsh-connect-workbuddy 的 dsm-* 系统同构：颜色全部走宿主 --dsw-alias-*
+ * 主题变量并带十六进制回退，因此深浅色主题自动适配；尺寸只用 16px 竖向节奏，
+ * 不靠各个区块自带 padding 去凑间距。
+ *
+ * 类名统一 dsm-doubaowork-* 前缀，避免与其它插件的卡片互相污染。
+ * 样式由模块顶层注入到 <head>（<style data-plugin-css=...>），不走 CSS 文件，
+ * 因此本插件保持零构建。
+ * ------------------------------------------------------------------------- */
+.dsm-doubaowork-card{
+  --dsm-doubaowork-surface:var(--dsw-alias-bg-layer-1,#17181b);
+  display:flex;flex-direction:column;gap:16px;margin:0;padding:16px 0 4px;
+  color:var(--dsw-alias-label-primary,#e6e6e6);
+  font-size:13px;line-height:1.5;
+}
+
+/* ---- 页头 ---- */
+.dsm-doubaowork-head{display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap;margin:0}
+.dsm-doubaowork-head-copy{display:flex;flex-direction:column;gap:4px;flex:1;min-width:200px}
+.dsm-doubaowork-title{margin:0;font-size:17px;font-weight:600;line-height:1.35;color:var(--dsw-alias-label-primary,#e6e6e6)}
+.dsm-doubaowork-desc{margin:0;font-size:13px;line-height:1.5;color:var(--dsw-alias-label-tertiary,#999)}
+.dsm-doubaowork-badges{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-left:auto}
+
+/* ---- 胶囊 ---- */
+.dsm-doubaowork-badge{
+  display:inline-flex;align-items:center;gap:5px;flex:none;
+  padding:2px 9px;border-radius:999px;font-size:12px;font-weight:500;line-height:18px;
+  color:var(--dsw-alias-brand-primary,#5686fe);
+  background:rgba(86,134,254,.12);border:1px solid rgba(86,134,254,.32);
+  white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis;
+}
+.dsm-doubaowork-badge-ok{
+  color:var(--dsw-alias-state-success-primary,#22a06b);
+  background:rgba(34,160,107,.12);border-color:rgba(34,160,107,.32);
+}
+.dsm-doubaowork-badge-warn{
+  color:var(--dsw-alias-state-warn-primary,#f59e0b);
+  background:rgba(245,158,11,.1);border-color:rgba(245,158,11,.32);
+}
+.dsm-doubaowork-badge-mute{
+  color:var(--dsw-alias-label-secondary,#c6c9d0);
+  background:transparent;border-color:var(--dsw-alias-border-l2,#3a3d45);
+}
+
+/* ---- 面板 tab 栏（吸附在卡片顶部，否则滚到池子就看不清当前所在面板）---- */
+.dsm-doubaowork-panels{
+  position:sticky;top:-1px;z-index:2;display:flex;align-items:stretch;gap:2px;margin:0;
+  border-bottom:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.24));
+  background:var(--dsm-doubaowork-surface,var(--dsw-alias-bg-layer-1,#17181b));
+}
+.dsm-doubaowork-panel-tab{
+  appearance:none;font:inherit;cursor:pointer;border:0;background:transparent;
+  padding:7px 11px;margin-bottom:-1px;border-bottom:2px solid transparent;
+  color:var(--dsw-alias-label-tertiary,#999);font-size:13px;font-weight:600;line-height:20px;
+  white-space:nowrap;transition:color .15s,border-color .15s;
+}
+.dsm-doubaowork-panel-tab:hover:not(.dsm-doubaowork-panel-tab-active){color:var(--dsw-alias-label-primary,#e6e6e6)}
+.dsm-doubaowork-panel-tab:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:1px}
+.dsm-doubaowork-panel-tab-active{color:var(--dsw-alias-label-primary,#e6e6e6);border-bottom-color:var(--dsw-alias-brand-primary,#5686fe)}
+/* hidden 必须能压过上面的 display:flex：ID/类选择器一旦给了 display，UA 的
+   [hidden]{display:none} 就失效，面板会永久绘制（workbuddy 5.20.1 踩过）。 */
+.dsm-doubaowork-panel{display:flex;flex-direction:column;gap:18px;margin:0}
+.dsm-doubaowork-panel[hidden]{display:none!important}
+
+/* ---- 分组 ---- */
+.dsm-doubaowork-section{display:flex;flex-direction:column;gap:10px;margin:0}
+.dsm-doubaowork-section-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0}
+.dsm-doubaowork-group-title{margin:0;font-size:15px;font-weight:600;line-height:1.4;color:var(--dsw-alias-label-primary,#e6e6e6)}
+.dsm-doubaowork-group-desc{margin:0;font-size:12px;line-height:17px;color:var(--dsw-alias-label-tertiary,#999)}
+.dsm-doubaowork-note{margin:0;font-size:12px;line-height:17px;color:var(--dsw-alias-label-secondary,#c6c9d0)}
+.dsm-doubaowork-hint{margin:0;font-size:12px;line-height:17px;color:var(--dsw-alias-label-tertiary,#999)}
+.dsm-doubaowork-error{margin:0;font-size:12px;line-height:17px;color:var(--dsw-alias-state-error-primary,#ef4444);white-space:pre-line}
+.dsm-doubaowork-ok{color:var(--dsw-alias-state-success-primary,#22a06b)}
+.dsm-doubaowork-warn{margin:0;padding:9px 11px;border-radius:9px;font-size:12px;line-height:17px;
+  color:var(--dsw-alias-state-warn-primary,#f59e0b);
+  background:rgba(245,158,11,.09);border:1px solid rgba(245,158,11,.3)}
+.dsm-doubaowork-code{
+  margin:0;padding:9px 11px;border-radius:9px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:12px;line-height:18px;white-space:pre-wrap;word-break:break-all;
+  color:var(--dsw-alias-label-secondary,#c6c9d0);
+  background:var(--dsw-alias-bg-layer-1,#17181b);border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.24));
+}
+
+/* ---- 开关行：整行可点，说明文字在标签下方，开关用平台原生控件只上色 ---- */
+.dsm-doubaowork-switchlist{
+  display:flex;flex-direction:column;margin:0;padding:0;list-style:none;
+  border:1px solid var(--dsw-alias-border-l2,#3a3d45);border-radius:12px;overflow:hidden;
+  background:var(--dsw-alias-bg-layer-2,#232529);
+}
+.dsm-doubaowork-switchrow{
+  display:flex;align-items:flex-start;gap:12px;padding:12px 14px;margin:0;
+  border-top:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.24));
+}
+.dsm-doubaowork-switchrow:first-child{border-top:0}
+.dsm-doubaowork-switchrow-copy{display:flex;flex-direction:column;gap:3px;flex:1;min-width:0}
+.dsm-doubaowork-switchrow-label{font-size:13px;font-weight:500;line-height:1.45;color:var(--dsw-alias-label-primary,#e6e6e6)}
+.dsm-doubaowork-switchrow-desc{font-size:12px;line-height:17px;color:var(--dsw-alias-label-tertiary,#999)}
+.dsm-doubaowork-switch{
+  display:inline-flex;align-items:center;justify-content:center;flex:none;margin-top:2px;cursor:pointer;
+}
+.dsm-doubaowork-switch input{margin:0;cursor:pointer;accent-color:var(--dsw-alias-brand-primary,#5686fe)}
+.dsm-doubaowork-switch input:disabled{cursor:default}
+
+/* ---- 字段行 ---- */
+.dsm-doubaowork-fields{
+  display:flex;flex-direction:column;margin:0;
+  border:1px solid var(--dsw-alias-border-l2,#3a3d45);border-radius:12px;overflow:hidden;
+  background:var(--dsw-alias-bg-layer-2,#232529);
+}
+.dsm-doubaowork-field{
+  display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 14px;margin:0;
+  border-top:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.24));
+}
+.dsm-doubaowork-field:first-child{border-top:0}
+.dsm-doubaowork-field-label{flex:1 1 140px;min-width:0;font-size:13px;line-height:1.45}
+.dsm-doubaowork-field-control{flex:0 1 280px;min-width:160px;display:flex;justify-content:flex-end}
+.dsm-doubaowork-select,.dsm-doubaowork-input{
+  appearance:none;font:inherit;font-size:13px;line-height:20px;width:100%;
+  padding:5px 10px;border-radius:8px;color:var(--dsw-alias-label-primary,#e6e6e6);
+  background:var(--dsw-alias-bg-layer-1,#17181b);
+  border:1px solid var(--dsw-alias-border-l2,#3a3d45);
+}
+.dsm-doubaowork-select{cursor:pointer;padding-right:26px;
+  /* 纯 CSS 箭头：不依赖宿主的图标集（不同 DSH 线图标名不同） */
+  background-image:linear-gradient(45deg,transparent 50%,currentColor 50%),linear-gradient(135deg,currentColor 50%,transparent 50%);
+  background-position:calc(100% - 15px) 50%,calc(100% - 10px) 50%;
+  background-size:5px 5px,5px 5px;background-repeat:no-repeat}
+.dsm-doubaowork-select:focus-visible,.dsm-doubaowork-input:focus-visible{
+  outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:1px}
+.dsm-doubaowork-input::placeholder{color:var(--dsw-alias-label-dimmed,#777)}
+
+/* ---- 只读测量值行（label + value 两端对齐）---- */
+.dsm-doubaowork-kv{display:flex;align-items:baseline;gap:12px;margin:0;padding:7px 0;min-width:0}
+.dsm-doubaowork-kv-label{flex:0 0 auto;font-size:12px;color:var(--dsw-alias-label-secondary,#c6c9d0)}
+.dsm-doubaowork-kv-value{flex:1 1 auto;min-width:0;font-size:12px;text-align:right;
+  color:var(--dsw-alias-label-primary,#e8e9ed);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsm-doubaowork-kv-value-wrap{white-space:normal;word-break:break-all;text-align:right}
+
+/* ---- 表格（逐账号）---- */
+.dsm-doubaowork-table{
+  display:flex;flex-direction:column;margin:0;padding:0;list-style:none;
+  border:1px solid var(--dsw-alias-border-l2,#3a3d45);border-radius:12px;overflow:hidden;
+  background:var(--dsw-alias-bg-layer-2,#232529);
+}
+.dsm-doubaowork-table-row{
+  display:flex;align-items:center;gap:10px;padding:9px 14px;margin:0;
+  border-top:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.24));font-size:13px;
+}
+.dsm-doubaowork-table-row:first-child{border-top:0}
+.dsm-doubaowork-table-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsm-doubaowork-table-meta{flex:none;font-size:12px;color:var(--dsw-alias-label-tertiary,#999)}
+.dsm-doubaowork-dot{display:inline-block;flex:none;width:7px;height:7px;border-radius:50%;background:var(--dsw-alias-label-dimmed,#777)}
+.dsm-doubaowork-dot-ok{background:var(--dsw-alias-state-success-primary,#22a06b)}
+.dsm-doubaowork-dot-bad{background:var(--dsw-alias-state-error-primary,#ef4444)}
+.dsm-doubaowork-dot-warn{background:var(--dsw-alias-state-warn-primary,#f59e0b)}
+
+/* ---- 操作条 ---- */
+.dsm-doubaowork-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0}
+.dsm-doubaowork-bar-status{flex:1 1 auto;min-width:0;font-size:12px;line-height:18px;
+  color:var(--dsw-alias-label-tertiary,#999);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsm-doubaowork-bar-actions{display:flex;gap:8px;flex:none;margin-left:auto}
+
+/* ---- 按钮原语 ---- */
+.dsm-doubaowork-btn{
+  appearance:none;font:inherit;cursor:pointer;border:1px solid transparent;border-radius:8px;
+  padding:5px 14px;font-size:13px;line-height:1.5;white-space:nowrap;
+}
+.dsm-doubaowork-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:1px}
+.dsm-doubaowork-btn:disabled{opacity:.4;cursor:default}
+.dsm-doubaowork-btn-outline{
+  border-color:var(--dsw-alias-border-l2,#3a3d45);color:var(--dsw-alias-label-secondary,#c6c9d0);
+  background:transparent;font-weight:500;
+}
+.dsm-doubaowork-btn-outline:hover:not(:disabled){
+  color:var(--dsw-alias-label-primary,#e6e6e6);border-color:var(--dsw-alias-label-dimmed,#777);
+  background:rgba(255,255,255,.04);
+}
+.dsm-doubaowork-btn-primary{background:var(--dsw-alias-label-primary,#e6e6e6);color:var(--dsw-alias-bg-layer-3,#2a2c33);font-weight:600}
+.dsm-doubaowork-btn-primary:hover:not(:disabled){opacity:.9}
+.dsm-doubaowork-btn-ghost{border-color:transparent;color:var(--dsw-alias-brand-primary,#5686fe);background:transparent;font-weight:500}
+.dsm-doubaowork-btn-ghost:hover:not(:disabled){text-decoration:underline}
+
+/* ---- 引导步骤 ---- */
+.dsm-doubaowork-steps{display:flex;flex-direction:column;gap:8px;margin:0;padding:0;list-style:none}
+.dsm-doubaowork-step{display:flex;align-items:flex-start;gap:9px;margin:0;font-size:13px;line-height:1.5}
+.dsm-doubaowork-step-mark{flex:none;width:16px;text-align:center;font-weight:700}
+.dsm-doubaowork-step-mark-done{color:var(--dsw-alias-state-success-primary,#22a06b)}
+.dsm-doubaowork-step-mark-warn{color:var(--dsw-alias-state-warn-primary,#f59e0b)}
+.dsm-doubaowork-step-mark-blocked{color:var(--dsw-alias-state-error-primary,#ef4444)}
+.dsm-doubaowork-step-mark-todo{color:var(--dsw-alias-label-dimmed,#777)}
+.dsm-doubaowork-step-copy{display:flex;flex-direction:column;gap:4px;flex:1;min-width:0}
+.dsm-doubaowork-step-detail{color:var(--dsw-alias-label-secondary,#c6c9d0)}
+
+/* ---- 扫码登录 ---- */
+.dsm-doubaowork-qr{display:flex;flex-direction:column;align-items:center;gap:8px;margin:0;padding:6px 0}
+.dsm-doubaowork-qr-img{
+  width:220px;height:220px;border-radius:10px;background:#fff;padding:8px;box-sizing:content-box;
+  border:1px solid var(--dsw-alias-border-l2,#3a3d45);
+}
+.dsm-doubaowork-qr-wait{font-size:12px;line-height:17px;color:var(--dsw-alias-label-secondary,#c6c9d0);text-align:center}
+`
+
+    const CARD_CSS_ID = 'dsh-connect-doubaowork/client.css'
+    if (typeof document !== 'undefined') {
+      const existing = document.querySelector(`style[data-plugin-css="${CARD_CSS_ID}"]`)
+      if (existing !== null) {
+        existing.textContent = CARD_CSS
+      } else {
+        const styleTag = document.createElement('style')
+        styleTag.dataset.plugin = 'dsh-connect-doubaowork'
+        styleTag.dataset.pluginCss = CARD_CSS_ID
+        styleTag.textContent = CARD_CSS
+        document.head.appendChild(styleTag)
+      }
+    }
+
     const COPY = {
       zh: {
         'nav.panel': '豆包工作模式',
         'card.title': '豆包工作模式',
         'card.desc': '复用豆包桌面端登录态，把豆包聚合的模型接入 DSH。',
+        'tab.overview': '概览',
+        'tab.gateway': '网关',
+        'tab.models': '模型',
+        'tab.accounts': '账号',
+        'tab.diagnostics': '诊断',
+        'hint.workMode': '首轮把 agent_mode 打开，豆包会按工作模式（自带工具、可跑多步）应答。',
+        'hint.flattenHistory': '把多轮历史压成一段文本一次发出；关掉则只发最后一条用户消息。',
+        'hint.poolEnabled': '请求失败时自动换下一个账号重试（仅在上游返回错误、尚未开始流式输出时生效）。',
+        'hint.keepaliveEnabled': '每天定时用登录态只读探测一次，确认 cookie 没失效；不产生任何豆包会话。',
+        'hint.backend': 'auto 会在豆包 CLI 已安装且已登录时优先走 CLI，否则复用桌面端 cookie 走 HTTP。切到 cli 后模型清单会改成豆包 CLI 自己上报的那一套。',
         'group.gateway': '网关选项',
         'field.conversationMode': '豆包侧会话归属',
         'field.conversationMode.single': 'single：全部共用一条豆包会话（推荐）',
@@ -150,6 +388,16 @@ window.__ModuleLoader__.load({
         'nav.panel': 'Doubao Work Mode',
         'card.title': 'Doubao Work Mode',
         'card.desc': 'Reuses the Doubao desktop login to expose its bundled models to DSH.',
+        'tab.overview': 'Overview',
+        'tab.gateway': 'Gateway',
+        'tab.models': 'Models',
+        'tab.accounts': 'Accounts',
+        'tab.diagnostics': 'Diagnostics',
+        'hint.workMode': 'Turns agent_mode on for the first turn, so Doubao answers in work mode (with its own tools and multi-step runs).',
+        'hint.flattenHistory': 'Sends the whole history flattened as one text block; turn it off to send only the last user message.',
+        'hint.poolEnabled': 'Retries with the next account when a request fails — only before any stream output has been written.',
+        'hint.keepaliveEnabled': 'Probes each account cookie once a day with a read-only request; creates no Doubao conversations.',
+        'hint.backend': 'auto prefers the CLI once it is installed and signed in, otherwise reuses the desktop cookie over HTTP. Switching to cli swaps the model list for the one the CLI reports.',
         'group.gateway': 'Gateway options',
         'field.conversationMode': 'Doubao-side conversation',
         'field.conversationMode.single': 'single: share one Doubao conversation (recommended)',
@@ -220,6 +468,20 @@ window.__ModuleLoader__.load({
         'field.cliPermissionMode.always_allow': 'always_allow (allow everything)',
         'field.cliEffort': 'CLI reasoning effort (empty = model default)',
         'field.cliEffort.default': 'model default',
+        'group.login': 'Scan to sign in',
+        'login.desc': 'Scan a QR code with the Doubao mobile app to sign in. The session is kept by the Doubao CLI itself — this plugin never reads or stores any credential.',
+        'action.login': 'Scan to sign in',
+        'action.loginAgain': 'Scan again',
+        'login.starting': 'Requesting a QR code…',
+        'login.waiting': 'Scan with the Doubao app and confirm on your phone (%s s left)',
+        'login.success': 'Signed in',
+        'login.expired': 'The QR code expired or the sign-in was rejected',
+        'login.cancel': 'Cancel',
+        'login.close': 'Close',
+        'login.failed': 'Sign-in failed',
+        'login.loggedIn': 'signed in',
+        'login.notLoggedIn': 'not signed in',
+        'login.active': 'sign-in in progress',
         'group.cli': 'Doubao CLI',
         'cli.installed': 'installed',
         'cli.notInstalled': 'not found',
@@ -246,7 +508,7 @@ window.__ModuleLoader__.load({
       },
     }
 
-    /** Card body: gateway options + pool health + keepalive. */
+    /** Card body: tabbed panels over the same read-only measurements as before. */
     function Doubaocard(props) {
       const { t, settingsScope } = props
       const snapshot = typeof settingsScope?.getSnapshot === 'function' ? settingsScope.getSnapshot() : undefined
@@ -259,6 +521,10 @@ window.__ModuleLoader__.load({
       const [checkingIn, setCheckingIn] = react.useState(false)
       const [refreshing, setRefreshing] = react.useState(false)
       const [checking, setChecking] = react.useState(false)
+      // 当前面板：与 workbuddy 一致用「一个文档的多个面板」而不是二选一开关格。
+      // 面板全部保持挂载（hidden 只隐藏不卸载），所以切回来不会重拉数据、
+      // 半填的草稿也不会丢。
+      const [tab, setTab] = react.useState('overview')
       // 扫码登录本地状态机：idle → starting → waiting → success | error
       // 只放浏览器侧的展示状态，二维码字节与 loginId 都来自 Host 的 start 响应
       const [login, setLogin] = react.useState({ phase: 'idle' })
@@ -320,9 +586,9 @@ window.__ModuleLoader__.load({
           }
           // CLI 探测结果会改变「当前生效」的后端与模型清单（auto 下登录后切到 cli），
           // 所以顺带重拉整份 status，别让那块只读测量值停在旧值。
-          const snapshot = await fetch(STATUS_PATH, { headers: { accept: 'application/json' } })
-          if (snapshot.ok) {
-            setStatus(await snapshot.json())
+          const snapshot2 = await fetch(STATUS_PATH, { headers: { accept: 'application/json' } })
+          if (snapshot2.ok) {
+            setStatus(await snapshot2.json())
             setStatusError(false)
           }
         } catch {} finally {
@@ -340,9 +606,9 @@ window.__ModuleLoader__.load({
         try {
           const response = await fetch(CHECKIN_RUN_PATH, { method: 'POST', headers: { accept: 'application/json' } })
           if (response.ok) {
-            const snapshot = await fetch(STATUS_PATH, { headers: { accept: 'application/json' } })
-            if (snapshot.ok) {
-              setStatus(await snapshot.json())
+            const snapshot2 = await fetch(STATUS_PATH, { headers: { accept: 'application/json' } })
+            if (snapshot2.ok) {
+              setStatus(await snapshot2.json())
               setStatusError(false)
             }
           }
@@ -446,228 +712,310 @@ window.__ModuleLoader__.load({
         }
       }, [login.phase, login.loginId])
 
-      const rowStyle = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', padding: '6px 0' }
-      const labelStyle = { flex: '0 0 auto', maxWidth: '60%' }
-      const sectionTitle = { margin: '14px 0 4px', fontSize: '0.92em', opacity: 0.8 }
-      const inputStyle = { minWidth: '160px' }
+      /* ------------------------------------------------------------------
+       * 渲染原语。
+       *
+       * 全部走 className（样式在模块顶层注入 <style>），不再用内联 style：
+       * 内联样式既没法表达 :hover / :focus-visible，也没法跟随宿主深浅色主题，
+       * 这就是旧卡片「一片灰字」的根源。
+       * ---------------------------------------------------------------- */
 
-      const rows = []
-      rows.push(h('div', { key: 'title', style: { fontWeight: 600, marginBottom: 2 } }, t('card.title')))
-      rows.push(h('div', { key: 'desc', style: { opacity: 0.7, fontSize: '0.9em' } }, t('card.desc')))
+      /** 分组：标题 + 可选描述 + 子元素。 */
+      const group = (key, title, children, description) => h('section', { key, className: 'dsm-doubaowork-section' },
+        h('div', { className: 'dsm-doubaowork-section-head' }, h('h4', { className: 'dsm-doubaowork-group-title' }, title)),
+        description === undefined || description === '' ? null : h('p', { className: 'dsm-doubaowork-group-desc' }, description),
+        ...(Array.isArray(children) ? children : [children]).filter(child => child !== null && child !== undefined && child !== false))
 
-      // —— 首次使用引导：没配好就把安装/配置步骤直接摊在卡片顶部 ——
-      rows.push(h('div', { key: 'g0', style: sectionTitle }, t('group.setup')))
-      const setup = status?.setup
-      if (setup === undefined || setup === null || setup.pending === true) {
-        rows.push(h('div', { key: 'setup-pending', style: { opacity: 0.7, fontSize: '0.88em' } }, t('setup.pending')))
-      } else {
-        rows.push(h('div', { key: 'setup-head', style: rowStyle },
-          h('span', null, setup.ready === true ? t('setup.ready') : t('setup.notReady')),
-          h('span', { style: { fontSize: '0.85em', opacity: 0.8 } },
-            setup.ready === true ? '✓' : (setup.summary?.cliInstalled === true ? `CLI v${setup.summary?.cliVersion ?? ''}` : '')),
-        ))
-        const steps = Array.isArray(setup.steps) ? setup.steps : []
-        for (const step of steps) {
-          const mark = step.status === 'done' ? '✓' : step.status === 'warn' ? '!' : step.status === 'blocked' ? '✗' : '○'
-          rows.push(h('div', { key: `setup-${step.id}`, style: { padding: '4px 0 4px 10px', fontSize: '0.88em' } },
-            h('div', null, `${mark} ${step.title}：${step.detail}`),
-            step.warn ? h('div', { style: { opacity: 0.75, paddingLeft: 12 } }, `${t('setup.warn')}${step.warn}`) : null,
-            (Array.isArray(step.fix) && step.fix.length > 0)
-              ? h('div', { style: { opacity: 0.8, paddingLeft: 12, fontFamily: 'monospace' } },
-                h('div', null, t('setup.fix')),
-                ...step.fix.map((line, index) => h('div', { key: `fix-${index}` }, line)))
-              : null,
-          ))
+      /** 只读键值行（label 左侧、值右侧，过长省略）。 */
+      const kv = (key, label, text, wrap = false) => h('div', { key, className: 'dsm-doubaowork-kv' },
+        h('span', { className: 'dsm-doubaowork-kv-label' }, label),
+        h('span', { className: `dsm-doubaowork-kv-value${wrap ? ' dsm-doubaowork-kv-value-wrap' : ''}` }, text))
+
+      /** 可编辑字段行：label + 控件。 */
+      const field = (key, label, control) => h('div', { key, className: 'dsm-doubaowork-field' },
+        h('label', { className: 'dsm-doubaowork-field-label' }, label),
+        h('div', { className: 'dsm-doubaowork-field-control' }, control))
+
+      /** 开关行：整行说明 + 平台原生 checkbox（只给 accent-color，不自己画）。 */
+      const switchRow = (key, label, description, checked, onChange, disabled = false) => h('div', { key, className: 'dsm-doubaowork-switchrow' },
+        h('div', { className: 'dsm-doubaowork-switchrow-copy' },
+          h('span', { className: 'dsm-doubaowork-switchrow-label' }, label),
+          description === undefined || description === '' ? null : h('span', { className: 'dsm-doubaowork-switchrow-desc' }, description)),
+        h('label', { className: 'dsm-doubaowork-switch' },
+          h('input', { type: 'checkbox', checked: checked === true, disabled, onChange: event => onChange(event.target.checked) })))
+
+      /** 按钮。variant: primary | outline | ghost。 */
+      const button = (key, label, onClick, variant = 'outline', disabled = false) => h('button', {
+        key,
+        type: 'button',
+        className: `dsm-doubaowork-btn dsm-doubaowork-btn-${variant}`,
+        disabled,
+        onClick,
+      }, label)
+
+      /** 下拉框（给 out-of-range 值一个稳定的空值 key）。 */
+      const select = (options, current, onChange) => h('select', {
+        className: 'dsm-doubaowork-select',
+        value: current,
+        onChange: event => onChange(event.target.value),
+      }, options.map(([optionValue, optionLabel]) => h('option', { key: `o-${optionValue === '' ? 'default' : optionValue}`, value: optionValue }, optionLabel)))
+
+      const input = (type, current, onChange, placeholder) => h('input', {
+        className: 'dsm-doubaowork-input',
+        type,
+        placeholder,
+        value: type === 'number' ? current : String(current ?? ''),
+        onChange: event => onChange(type === 'number' ? Number(event.target.value) : event.target.value),
+      })
+
+      const note = (key, text) => h('p', { key, className: 'dsm-doubaowork-note' }, text)
+      const hint = (key, text) => h('p', { key, className: 'dsm-doubaowork-hint' }, text)
+
+      /** 面板容器：不活跃的面板保持挂载，只加 hidden。 */
+      const panel = (id, children) => h('div', {
+        key: `panel-${id}`,
+        className: 'dsm-doubaowork-panel',
+        hidden: tab !== id,
+      }, ...children.filter(child => child !== null && child !== undefined && child !== false))
+
+      /* ------------------------------------------------------------------
+       * 页头：标题 + 描述 + 右侧状态徽章。
+       *
+       * 徽章只表达「当前实测状态」，不承担操作：后端徽章来自 status，
+       * CLI 徽章来自 status.cli，两者都由 Host 侧探测产生。
+       * ---------------------------------------------------------------- */
+      const effectiveBackend = status?.effectiveBackend === 'cli' ? 'cli' : 'http'
+      const cliInfo = status?.cli
+      const badges = []
+      if (status !== null && status !== undefined) {
+        badges.push(h('span', {
+          key: 'badge-backend',
+          className: `dsm-doubaowork-badge${effectiveBackend === 'cli' ? ' dsm-doubaowork-badge-ok' : ''}`,
+        }, t(`effective.backend.${effectiveBackend}`)))
+        if (cliInfo !== null && cliInfo !== undefined) {
+          badges.push(h('span', {
+            key: 'badge-cli',
+            className: `dsm-doubaowork-badge${cliInfo.loggedIn === true ? ' dsm-doubaowork-badge-ok' : ' dsm-doubaowork-badge-mute'}`,
+          }, cliInfo.loggedIn === true
+            ? `CLI v${cliInfo.version === '' || cliInfo.version === undefined ? '' : cliInfo.version}`
+            : t('cli.notLoggedIn')))
         }
-      }
-      rows.push(h('div', { key: 'setup-refresh', style: rowStyle },
-        h('button', { type: 'button', disabled: checking, onClick: refreshSetup }, checking ? t('action.checking') : t('action.refreshSetup')))
-      )
-
-      // —— 网关选项（settingsScope 缺席时降级为只读说明）——
-      rows.push(h('div', { key: 'g1', style: sectionTitle }, t('group.gateway')))
-      if (settingsScope !== undefined) {
-        rows.push(h('div', { key: 'f1', style: rowStyle },
-          h('label', { style: labelStyle }, t('field.conversationMode')),
-          h('select', {
-            style: inputStyle,
-            value: value.conversationMode ?? 'single',
-            onChange: event => setField('conversationMode', event.target.value),
-          },
-          h('option', { value: 'single' }, t('field.conversationMode.single')),
-          h('option', { value: 'per-chat' }, t('field.conversationMode.per-chat')))),
-        )
-        rows.push(h('div', { key: 'f2', style: rowStyle },
-          h('label', { style: labelStyle }, t('field.workMode')),
-          h('input', { type: 'checkbox', checked: value.workMode !== false, onChange: event => setField('workMode', event.target.checked) })),
-        )
-        rows.push(h('div', { key: 'f3', style: rowStyle },
-          h('label', { style: labelStyle }, t('field.flattenHistory')),
-          h('input', { type: 'checkbox', checked: value.flattenHistory !== false, onChange: event => setField('flattenHistory', event.target.checked) })),
-        )
-        rows.push(h('div', { key: 'f4', style: rowStyle },
-          h('label', { style: labelStyle }, t('field.reasoningEffort')),
-          h('select', {
-            style: inputStyle,
-            value: String(value.reasoningEffort ?? '4'),
-            onChange: event => setField('reasoningEffort', event.target.value),
-          },
-          ['0', '1', '2', '3', '4'].map(level => h('option', { key: level, value: level }, level)))),
-        )
-        rows.push(h('div', { key: 'f5', style: rowStyle },
-          h('label', { style: labelStyle }, t('field.timeoutSeconds')),
-          h('input', {
-            style: inputStyle, type: 'number', min: 1,
-            value: value.timeoutSeconds ?? 300,
-            onChange: event => setField('timeoutSeconds', Number(event.target.value)),
-          })),
-        )
-        rows.push(h('div', { key: 'f6', style: rowStyle },
-          h('label', { style: labelStyle }, t('field.poolEnabled')),
-          h('input', { type: 'checkbox', checked: value.poolEnabled === true, onChange: event => setField('poolEnabled', event.target.checked) })),
-        )
-        rows.push(h('div', { key: 'f7', style: rowStyle },
-          h('label', { style: labelStyle }, t('field.keepaliveEnabled')),
-          h('input', { type: 'checkbox', checked: value.keepaliveEnabled === true, onChange: event => setField('keepaliveEnabled', event.target.checked) })),
-        )
-        rows.push(h('div', { key: 'save', style: rowStyle },
-          dirty ? h('span', { style: { color: '#d97706', fontSize: '0.85em' } }, t('hint.saveUnsaved')) : h('span'),
-          h('button', {
-            type: 'button',
-            disabled: !dirty,
-            onClick: save,
-            style: { opacity: dirty ? 1 : 0.5 },
-          }, savedAt > 0 && !dirty ? t('action.saved') : t('action.save'))),
-        )
       } else {
-        rows.push(h('div', { key: 'ro', style: { opacity: 0.7, fontSize: '0.88em' } }, t('accounts.readonly')))
+        badges.push(h('span', { key: 'badge-unknown', className: 'dsm-doubaowork-badge dsm-doubaowork-badge-mute' },
+          statusError ? t('error.fetch') : t('cli.unknown')))
       }
 
-      // —— 上游后端选择 + CLI 状态 ——
-      rows.push(h('div', { key: 'gb', style: sectionTitle }, t('group.backend')))
-      if (settingsScope !== undefined) {
-        rows.push(h('div', { key: 'b1', style: rowStyle },
-          h('label', { style: labelStyle }, t('field.backend')),
-          h('select', {
-            style: inputStyle,
-            value: value.backend ?? 'auto',
-            onChange: event => setField('backend', event.target.value),
-          },
-          h('option', { value: 'auto' }, t('field.backend.auto')),
-          h('option', { value: 'cli' }, t('field.backend.cli')),
-          h('option', { value: 'http' }, t('field.backend.http')))),
-        )
-        rows.push(h('div', { key: 'b2', style: rowStyle },
-          h('label', { style: labelStyle }, t('field.cliPath')),
-          h('input', {
-            style: inputStyle, type: 'text', placeholder: 'doubao',
-            value: value.cliPath ?? '',
-            onChange: event => setField('cliPath', event.target.value),
-          })),
-        )
-        rows.push(h('div', { key: 'b3', style: rowStyle },
-          h('label', { style: labelStyle }, t('field.cliWorkspace')),
-          h('input', {
-            style: inputStyle, type: 'text', placeholder: '~',
-            value: value.cliWorkspace ?? '',
-            onChange: event => setField('cliWorkspace', event.target.value),
-          })),
-        )
-        rows.push(h('div', { key: 'b4', style: rowStyle },
-          h('label', { style: labelStyle }, t('field.cliPermissionMode')),
-          h('select', {
-            style: inputStyle,
-            value: value.cliPermissionMode ?? 'ask_risky',
-            onChange: event => setField('cliPermissionMode', event.target.value),
-          },
-          h('option', { value: 'ask_risky' }, t('field.cliPermissionMode.ask_risky')),
-          h('option', { value: 'ask_always' }, t('field.cliPermissionMode.ask_always')),
-          h('option', { value: 'always_allow' }, t('field.cliPermissionMode.always_allow')))),
-        )
-        rows.push(h('div', { key: 'b5', style: rowStyle },
-          h('label', { style: labelStyle }, t('field.cliEffort')),
-          h('select', {
-            style: inputStyle,
-            value: value.cliEffort ?? '',
-            onChange: event => setField('cliEffort', event.target.value),
-          },
-          [['', t('field.cliEffort.default')], ['none', 'none'], ['minimal', 'minimal'], ['low', 'low'],
-            ['medium', 'medium'], ['high', 'high'], ['xhigh', 'xhigh'], ['max', 'max']]
-            .map(([level, label]) => h('option', { key: level === '' ? 'default' : level, value: level }, label)))),
-        )
-      }
+      const header = h('header', { key: 'head', className: 'dsm-doubaowork-head' },
+        h('div', { className: 'dsm-doubaowork-head-copy' },
+          h('h3', { className: 'dsm-doubaowork-title' }, t('card.title')),
+          h('p', { className: 'dsm-doubaowork-desc' }, t('card.desc'))),
+        h('div', { className: 'dsm-doubaowork-badges' }, ...badges))
 
-      // —— 当前生效后端与模型清单（只读测量值）——
-      // 关键：这里是「二选一」结果的唯一展示位。status.models 由宿主侧按
-      // effectiveBackend 交给 catalogForBackend() 算出，因此 CLI 后端只会列出
-      // CLI 实报的模型，HTTP 后端只会列出静态表，两者不会混在一起。
-      rows.push(h('div', { key: 'ge', style: sectionTitle }, t('group.effective')))
+      /* ---- 面板一：概览（引导 + 当前生效）---- */
+      const overview = []
+      overview.push(group('g-setup', t('group.setup'), (() => {
+        const setup = status?.setup
+        if (setup === undefined || setup === null || setup.pending === true) {
+          return [h('p', { key: 'setup-pending', className: 'dsm-doubaowork-hint' }, t('setup.pending')),
+            h('div', { key: 'setup-bar', className: 'dsm-doubaowork-bar' },
+              button('setup-refresh', checking ? t('action.checking') : t('action.refreshSetup'), refreshSetup, 'outline', checking))]
+        }
+        const items = []
+        items.push(h('div', { key: 'setup-head', className: 'dsm-doubaowork-bar' },
+          h('span', {
+            className: `dsm-doubaowork-badge${setup.ready === true ? ' dsm-doubaowork-badge-ok' : ' dsm-doubaowork-badge-warn'}`,
+          }, setup.ready === true ? t('setup.ready') : t('setup.notReady')),
+          h('div', { className: 'dsm-doubaowork-bar-actions' },
+            button('setup-refresh', checking ? t('action.checking') : t('action.refreshSetup'), refreshSetup, 'outline', checking))))
+
+        const steps = Array.isArray(setup.steps) ? setup.steps : []
+        if (steps.length > 0) {
+          const stepNodes = []
+          for (const step of steps) {
+            const mark = step.status === 'done' ? '✓' : step.status === 'warn' ? '!' : step.status === 'blocked' ? '✗' : '○'
+            const markClass = step.status === 'done' ? 'done' : step.status === 'warn' ? 'warn' : step.status === 'blocked' ? 'blocked' : 'todo'
+            const copy = [h('span', { key: 'd', className: 'dsm-doubaowork-step-detail' }, `${step.title}：${step.detail}`)]
+            if (step.warn) copy.push(h('span', { key: 'w', className: 'dsm-doubaowork-warn' }, `${t('setup.warn')}${step.warn}`))
+            if (Array.isArray(step.fix) && step.fix.length > 0) {
+              copy.push(h('div', { key: 'f', className: 'dsm-doubaowork-step-copy' },
+                h('span', { className: 'dsm-doubaowork-hint' }, t('setup.fix')),
+                h('pre', { className: 'dsm-doubaowork-code' }, step.fix.join('\n'))))
+            }
+            stepNodes.push(h('li', { key: `step-${step.id}`, className: 'dsm-doubaowork-step' },
+              h('span', { className: `dsm-doubaowork-step-mark dsm-doubaowork-step-mark-${markClass}` }, mark),
+              h('div', { className: 'dsm-doubaowork-step-copy' }, ...copy)))
+          }
+          items.push(h('ul', { key: 'steps', className: 'dsm-doubaowork-steps' }, ...stepNodes))
+        }
+        return items
+      })()))
+
+      const effectiveNodes = []
       if (status === null || status === undefined) {
-        rows.push(h('div', { key: 'geu', style: { opacity: 0.7, fontSize: '0.88em' } }, statusError ? t('error.fetch') : t('cli.unknown')))
+        effectiveNodes.push(h('p', { key: 'eff-unknown', className: 'dsm-doubaowork-hint' }, statusError ? t('error.fetch') : t('cli.unknown')))
       } else {
-        const effective = status.effectiveBackend === 'cli' ? 'cli' : 'http'
-        rows.push(h('div', { key: 'ge1', style: rowStyle },
-          h('span', null, t('effective.backend')),
-          h('span', { style: { fontSize: '0.85em', opacity: 0.85 } }, t(`effective.backend.${effective}`)),
-        ))
         const liveModels = Array.isArray(status.models) ? status.models : []
-        rows.push(h('div', { key: 'ge2', style: rowStyle },
-          h('span', null, t('effective.models')),
-          h('span', { style: { fontSize: '0.85em', opacity: 0.85, maxWidth: '62%', textAlign: 'right' } },
-            liveModels.length === 0 ? t('effective.noModels') : `${liveModels.length}：${liveModels.join(', ')}`),
-        ))
-        rows.push(h('div', { key: 'ge3', style: rowStyle },
-          h('span', null, t('effective.default')),
-          h('span', { style: { fontSize: '0.85em', opacity: 0.85 } }, String(status.defaultModel ?? '')),
-        ))
+        effectiveNodes.push(kv('eff-1', t('effective.backend'), t(`effective.backend.${effectiveBackend}`)))
+        effectiveNodes.push(kv('eff-2', t('effective.models'),
+          liveModels.length === 0 ? t('effective.noModels') : `${liveModels.length}：${liveModels.join(', ')}`, true))
+        effectiveNodes.push(kv('eff-3', t('effective.default'), String(status.defaultModel ?? '')))
       }
+      overview.push(group('g-effective', t('group.effective'), effectiveNodes))
 
-      // —— 豆包侧留痕（只读测量值）——
-      // 豆包 CLI 没有删会话的命令，历史是服务端产物；能减少留痕的只有「复用同一条
-      // 会话」+「绑定落盘跨重启存活」。这里把这两个事实摊开给用户看，避免误以为
-      // 插件在偷偷上传/留存对话。
-      rows.push(h('div', { key: 'gt', style: sectionTitle }, t('group.trace')))
-      if (status === null || status === undefined) {
-        rows.push(h('div', { key: 'gtu', style: { opacity: 0.7, fontSize: '0.88em' } }, statusError ? t('error.fetch') : t('cli.unknown')))
-      } else {
-        const mode = String(status.conversationMode ?? 'single') === 'per-chat' ? 'perChat' : 'single'
-        rows.push(h('div', { key: 'gt1', style: rowStyle },
-          h('span', null, t('trace.mode')),
-          h('span', { style: { fontSize: '0.85em', opacity: 0.85 } }, t(`trace.mode.${mode}`)),
-        ))
-        const bound = Number(status.conversations?.count ?? 0)
-        rows.push(h('div', { key: 'gt2', style: rowStyle },
-          h('span', null, t('trace.bound')),
-          h('span', { style: { fontSize: '0.85em', opacity: 0.85 } }, t('trace.bound.value').replace('%s', String(bound))),
-        ))
-        const persisted = status.conversations?.persisted === true
-        rows.push(h('div', { key: 'gt3', style: rowStyle },
-          h('span', null, t('trace.persisted')),
-          h('span', { style: { fontSize: '0.85em', opacity: 0.85, maxWidth: '62%', textAlign: 'right' } },
-            persisted ? t('trace.persisted.yes').replace('%s', String(status.conversations?.file ?? '')) : t('trace.persisted.no')),
-        ))
-        rows.push(h('div', { key: 'gt4', style: { opacity: 0.75, fontSize: '0.82em', marginTop: '0.35em' } }, t('trace.hint')))
-      }
-
-      // —— 每日自动签到 ——
-      // 豆包没有签到按钮：免费积分按「当日首次登录」发放。这里把「开关 + 时刻 +
-      // 今日结果」摊开，并提供手动按钮（Host 侧走 force，点一次就真访问一次）。
-      rows.push(h('div', { key: 'gk', style: sectionTitle }, t('group.checkin')))
+      /* ---- 面板二：网关（可编辑配置 + 保存）---- */
+      const gateway = []
       if (settingsScope !== undefined) {
-        rows.push(h('div', { key: 'ck1', style: rowStyle },
-          h('label', { style: labelStyle }, t('checkin.enabled')),
-          h('select', {
-            style: inputStyle,
-            value: value.checkinEnabled === true ? 'on' : 'off',
-            onChange: event => setField('checkinEnabled', event.target.value === 'on'),
-          },
-          h('option', { value: 'off' }, t('checkin.enabled.off')),
-          h('option', { value: 'on' }, t('checkin.enabled.on')))),
-        )
-        rows.push(h('div', { key: 'ck2', style: rowStyle },
-          h('label', { style: labelStyle }, t('checkin.time')),
-          h('input', {
-            style: inputStyle,
+        const rows = []
+        rows.push(field('f1', t('field.conversationMode'), select([
+          ['single', t('field.conversationMode.single')],
+          ['per-chat', t('field.conversationMode.per-chat')],
+        ], value.conversationMode ?? 'single', next => setField('conversationMode', next))))
+        rows.push(field('f2', t('field.reasoningEffort'), select(
+          ['0', '1', '2', '3', '4'].map(level => [level, level]),
+          String(value.reasoningEffort ?? '4'), next => setField('reasoningEffort', next))))
+        rows.push(field('f3', t('field.timeoutSeconds'), input('number', value.timeoutSeconds ?? 300, next => setField('timeoutSeconds', next))))
+        gateway.push(h('div', { key: 'gw-fields', className: 'dsm-doubaowork-fields' }, ...rows))
+
+        const switches = []
+        switches.push(switchRow('s1', t('field.workMode'), t('hint.workMode'),
+          value.workMode !== false, next => setField('workMode', next)))
+        switches.push(switchRow('s2', t('field.flattenHistory'), t('hint.flattenHistory'),
+          value.flattenHistory !== false, next => setField('flattenHistory', next)))
+        switches.push(switchRow('s3', t('field.poolEnabled'), t('hint.poolEnabled'),
+          value.poolEnabled === true, next => setField('poolEnabled', next)))
+        switches.push(switchRow('s4', t('field.keepaliveEnabled'), t('hint.keepaliveEnabled'),
+          value.keepaliveEnabled === true, next => setField('keepaliveEnabled', next)))
+        gateway.push(h('div', { key: 'gw-switches', className: 'dsm-doubaowork-switchlist' }, ...switches))
+      } else {
+        gateway.push(note('gw-ro', t('accounts.readonly')))
+      }
+
+      /* ---- 面板三：模型（后端选择 + CLI 探测）---- */
+      const modelsPanel = []
+      if (settingsScope !== undefined) {
+        const rows = []
+        rows.push(field('b1', t('field.backend'), select([
+          ['auto', t('field.backend.auto')],
+          ['cli', t('field.backend.cli')],
+          ['http', t('field.backend.http')],
+        ], value.backend ?? 'auto', next => setField('backend', next))))
+        rows.push(field('b2', t('field.cliPath'), input('text', value.cliPath ?? '', next => setField('cliPath', next), 'doubao')))
+        rows.push(field('b3', t('field.cliWorkspace'), input('text', value.cliWorkspace ?? '', next => setField('cliWorkspace', next), '~')))
+        rows.push(field('b4', t('field.cliPermissionMode'), select([
+          ['ask_risky', t('field.cliPermissionMode.ask_risky')],
+          ['ask_always', t('field.cliPermissionMode.ask_always')],
+          ['always_allow', t('field.cliPermissionMode.always_allow')],
+        ], value.cliPermissionMode ?? 'ask_risky', next => setField('cliPermissionMode', next))))
+        rows.push(field('b5', t('field.cliEffort'), select(
+          [['', t('field.cliEffort.default')], ['none', 'none'], ['minimal', 'minimal'], ['low', 'low'],
+            ['medium', 'medium'], ['high', 'high'], ['xhigh', 'xhigh'], ['max', 'max']],
+          value.cliEffort ?? '', next => setField('cliEffort', next))))
+        // 「上游后端」是一组互相影响的字段（选 cli 才用得到 cliPath/cliPermissionMode），
+        // 所以整组包在同一个分组标题下，而不是散落在面板里。
+        modelsPanel.push(group('md-backend', t('group.backend'), [
+          h('div', { key: 'md-fields', className: 'dsm-doubaowork-fields' }, ...rows),
+          hint('md-hint', t('hint.backend')),
+        ]))
+      } else {
+        modelsPanel.push(note('md-ro', t('accounts.readonly')))
+      }
+
+      const cliNodes = []
+      if (cliInfo === null || cliInfo === undefined) {
+        cliNodes.push(h('p', { key: 'cli-unknown', className: 'dsm-doubaowork-hint' }, statusError ? t('error.fetch') : t('cli.unknown')))
+      } else {
+        cliNodes.push(kv('cli-1', t('cli.installed'),
+          cliInfo.installed === true ? `✓ ${cliInfo.version === '' || cliInfo.version === undefined ? '' : `v${cliInfo.version}`}`.trim() : t('cli.notInstalled')))
+        cliNodes.push(kv('cli-2', t('cli.loggedIn'),
+          cliInfo.loggedIn === true ? `✓ ${t('cli.loggedIn')}` : t('cli.notLoggedIn')))
+        const cliModels = Array.isArray(cliInfo.models) ? cliInfo.models : []
+        cliNodes.push(kv('cli-3', t('cli.models'),
+          cliModels.length === 0 ? t('cli.noModels') : `${cliModels.length}：${cliModels.join(', ')}`, true))
+      }
+      cliNodes.push(h('div', { key: 'cli-bar', className: 'dsm-doubaowork-bar' },
+        h('div', { className: 'dsm-doubaowork-bar-actions' },
+          button('cli-refresh', refreshing ? t('action.refreshing') : t('action.refreshCli'), refreshCli, 'outline', refreshing))))
+      modelsPanel.push(group('md-cli', t('group.cli'), cliNodes))
+
+      /* ---- 面板四：账号（池 + 扫码登录 + 签到）---- */
+      const accountsPanel = []
+
+      // 扫码登录：只在 Host 提供了 login 能力时渲染（缺席给会失败的按钮更糟）
+      const loginState = status?.login
+      if (loginState !== null && loginState !== undefined) {
+        const loggedIn = cliInfo?.loggedIn === true
+        const loginNodes = [h('p', { key: 'login-desc', className: 'dsm-doubaowork-group-desc' }, t('login.desc'))]
+        if (login.phase === 'waiting') {
+          const left = Math.max(0, Math.ceil(((login.expiresAt ?? 0) - Date.now()) / 1000))
+          loginNodes.push(h('div', { key: 'qr', className: 'dsm-doubaowork-qr' },
+            h('img', {
+              className: 'dsm-doubaowork-qr-img',
+              src: login.imageDataUrl,
+              alt: t('login.waiting').replace('%s', ''),
+              width: 220,
+              height: 220,
+            }),
+            h('p', { className: 'dsm-doubaowork-qr-wait' }, t('login.waiting').replace('%s', String(left)))))
+          loginNodes.push(h('div', { key: 'qr-bar', className: 'dsm-doubaowork-bar' },
+            h('div', { className: 'dsm-doubaowork-bar-actions' },
+              button('qr-cancel', t('login.cancel'), () => { void cancelLogin() }, 'outline'))))
+        } else if (login.phase === 'starting') {
+          loginNodes.push(h('p', { key: 'qr-starting', className: 'dsm-doubaowork-hint' }, t('login.starting')))
+        } else if (login.phase === 'success') {
+          loginNodes.push(h('div', { key: 'qr-ok', className: 'dsm-doubaowork-bar' },
+            h('span', { className: 'dsm-doubaowork-badge dsm-doubaowork-badge-ok' }, `✓ ${t('login.success')}`),
+            h('div', { className: 'dsm-doubaowork-bar-actions' },
+              button('qr-again', t('action.loginAgain'), () => { void startLogin() }, 'outline'))))
+        } else {
+          if (login.phase === 'error') {
+            loginNodes.push(h('p', { key: 'qr-err', className: 'dsm-doubaowork-error' }, `${t('login.failed')}：${login.error}`))
+          }
+          loginNodes.push(h('div', { key: 'qr-bar', className: 'dsm-doubaowork-bar' },
+            h('span', { className: 'dsm-doubaowork-bar-status' },
+              loggedIn ? `${t('login.loggedIn')}（${t('action.loginAgain')}）` : t('login.notLoggedIn')),
+            h('div', { className: 'dsm-doubaowork-bar-actions' },
+              button('qr-start', loggedIn ? t('action.loginAgain') : t('action.login'), () => { void startLogin() }, 'primary'))))
+        }
+        accountsPanel.push(group('g-login', t('group.login'), loginNodes))
+      }
+
+      // 账号池健康
+      const poolNodes = []
+      const list = Array.isArray(status?.accounts) ? status.accounts : []
+      if (list.length === 0) {
+        poolNodes.push(h('p', { key: 'pool-empty', className: 'dsm-doubaowork-hint' }, statusError ? t('error.fetch') : t('accounts.empty')))
+      } else {
+        const rows = []
+        for (const account of list) {
+          const health = account.health === null || account.health === undefined
+            ? t('accounts.health.unknown')
+            : account.health.ok === true ? t('accounts.health.ok') : `${t('accounts.health.bad')} (HTTP ${account.health.status})`
+          const dotClass = account.health === null || account.health === undefined
+            ? '' : account.health.ok === true ? ' dsm-doubaowork-dot-ok' : ' dsm-doubaowork-dot-bad'
+          rows.push(h('li', { key: `acct-${account.id}`, className: 'dsm-doubaowork-table-row' },
+            h('span', { className: `dsm-doubaowork-dot${dotClass}` }),
+            h('span', { className: 'dsm-doubaowork-table-name' }, `${account.label} (${account.id})`),
+            h('span', { className: 'dsm-doubaowork-table-meta' }, `${account.enabled ? '' : '· '}${health}`)))
+        }
+        poolNodes.push(h('ul', { key: 'pool-table', className: 'dsm-doubaowork-table' }, ...rows))
+        const lastRun = status?.lastRun ? new Date(status.lastRun).toLocaleString() : t('accounts.never')
+        poolNodes.push(kv('pool-last', t('accounts.lastRun'), lastRun))
+      }
+      poolNodes.push(h('div', { key: 'pool-bar', className: 'dsm-doubaowork-bar' },
+        h('div', { className: 'dsm-doubaowork-bar-actions' },
+          button('pool-probe', probing ? t('action.checking') : t('action.checkNow'), probeNow, 'outline', probing))))
+      accountsPanel.push(group('g-accounts', t('group.accounts'), poolNodes))
+
+      // 每日自动签到
+      const checkinNodes = []
+      if (settingsScope !== undefined) {
+        checkinNodes.push(h('div', { key: 'ck-fields', className: 'dsm-doubaowork-fields' },
+          field('ck1', t('checkin.enabled'), select([
+            ['off', t('checkin.enabled.off')],
+            ['on', t('checkin.enabled.on')],
+          ], value.checkinEnabled === true ? 'on' : 'off', next => setField('checkinEnabled', next === 'on'))),
+          field('ck2', t('checkin.time'), h('input', {
+            className: 'dsm-doubaowork-input',
             type: 'time',
             value: `${String(value.checkinHour ?? 8).padStart(2, '0')}:${String(value.checkinMinute ?? 10).padStart(2, '0')}`,
             onChange: event => {
@@ -677,161 +1025,103 @@ window.__ModuleLoader__.load({
               if (Number.isInteger(h2) && h2 >= 0 && h2 <= 23) setField('checkinHour', h2)
               if (Number.isInteger(m2) && m2 >= 0 && m2 <= 59) setField('checkinMinute', m2)
             },
-          })),
-        )
+          }))))
       }
 
       const checkin = status?.checkin
       if (status === null || status === undefined) {
-        rows.push(h('div', { key: 'cku', style: { opacity: 0.7, fontSize: '0.88em' } }, statusError ? t('error.fetch') : t('cli.unknown')))
+        checkinNodes.push(h('p', { key: 'ck-unknown', className: 'dsm-doubaowork-hint' }, statusError ? t('error.fetch') : t('cli.unknown')))
       } else if (checkin === undefined || checkin === null) {
-        rows.push(h('div', { key: 'cku', style: { opacity: 0.7, fontSize: '0.88em' } }, t('cli.unknown')))
+        checkinNodes.push(h('p', { key: 'ck-unknown', className: 'dsm-doubaowork-hint' }, t('cli.unknown')))
       } else {
-        rows.push(h('div', { key: 'ck3', style: rowStyle },
-          h('span', null, t('checkin.next')),
-          h('span', { style: { fontSize: '0.85em', opacity: 0.85 } },
-            typeof checkin.nextRunAt === 'string' && checkin.nextRunAt !== ''
-              ? new Date(checkin.nextRunAt).toLocaleString()
-              : t('checkin.next.none')),
-        ))
-        rows.push(h('div', { key: 'ck4', style: rowStyle },
-          h('span', null, t('checkin.last')),
-          h('span', { style: { fontSize: '0.85em', opacity: 0.85 } },
-            typeof checkin.lastRun === 'string' && checkin.lastRun !== ''
-              ? `${new Date(checkin.lastRun).toLocaleString()}${checkin.lastDay ? `（${checkin.lastDay}）` : ''}`
-              : t('checkin.last.none')),
-        ))
-        rows.push(h('div', { key: 'ck5', style: rowStyle },
-          h('span', null, t('checkin.result')),
-          h('span', { style: { fontSize: '0.85em', opacity: 0.85 } },
-            `${t('checkin.result.value').replace('%s', String(checkin.signedCount ?? 0))}${Number(checkin.skipped ?? 0) > 0 ? `，${t('checkin.result.skipped').replace('%s', String(checkin.skipped))}` : ''}`),
-        ))
+        checkinNodes.push(kv('ck3', t('checkin.next'),
+          typeof checkin.nextRunAt === 'string' && checkin.nextRunAt !== ''
+            ? new Date(checkin.nextRunAt).toLocaleString()
+            : t('checkin.next.none')))
+        checkinNodes.push(kv('ck4', t('checkin.last'),
+          typeof checkin.lastRun === 'string' && checkin.lastRun !== ''
+            ? `${new Date(checkin.lastRun).toLocaleString()}${checkin.lastDay ? `（${checkin.lastDay}）` : ''}`
+            : t('checkin.last.none')))
+        checkinNodes.push(kv('ck5', t('checkin.result'),
+          `${t('checkin.result.value').replace('%s', String(checkin.signedCount ?? 0))}${Number(checkin.skipped ?? 0) > 0 ? `，${t('checkin.result.skipped').replace('%s', String(checkin.skipped))}` : ''}`))
         const perAccount = Array.isArray(checkin.accounts) ? checkin.accounts : []
-        for (const entry of perAccount) {
-          const state = entry.ok === true
-            ? t('checkin.account.ok')
-            : entry.ok === false
-              ? `${t('checkin.account.fail')}${entry.code !== null && entry.code !== undefined && entry.code !== 0 ? `（业务码 ${entry.code}）` : ''}`
-              : t('checkin.account.pending')
-          rows.push(h('div', { key: `ck-${entry.id}`, style: { padding: '4px 0 4px 10px', fontSize: '0.88em', opacity: 0.9 } },
-            `${entry.id}：${state}${entry.day ? `（${entry.day}）` : ''}`))
-        }
-        rows.push(h('div', { key: 'ck6', style: rowStyle },
-          h('button', { type: 'button', disabled: checkingIn, onClick: checkinNow },
-            checkingIn ? t('action.checkingIn') : t('action.checkin'))))
-        rows.push(h('div', { key: 'ck7', style: { opacity: 0.75, fontSize: '0.82em', marginTop: '0.35em' } }, t('checkin.hint')))
-      }
-
-      // —— CLI 探测状态（只读测量值 + 手动重新探测）——
-      rows.push(h('div', { key: 'gc', style: sectionTitle }, t('group.cli')))
-      const cli = status?.cli
-      if (cli === null || cli === undefined) {
-        rows.push(h('div', { key: 'cliu', style: { opacity: 0.7, fontSize: '0.88em' } }, statusError ? t('error.fetch') : t('cli.unknown')))
-      } else {
-        rows.push(h('div', { key: 'clii', style: rowStyle },
-          h('span', null, t('cli.installed')),
-          h('span', { style: { fontSize: '0.85em', opacity: 0.85 } },
-            cli.installed === true ? `✓ ${cli.version === '' ? '' : `v${cli.version}`}`.trim() : t('cli.notInstalled')),
-        ))
-        rows.push(h('div', { key: 'clil', style: rowStyle },
-          h('span', null, t('cli.loggedIn')),
-          h('span', { style: { fontSize: '0.85em', opacity: 0.85 } },
-            cli.loggedIn === true ? `✓ ${t('cli.loggedIn')}` : t('cli.notLoggedIn')),
-        ))
-        const cliModels = Array.isArray(cli.models) ? cli.models : []
-        rows.push(h('div', { key: 'clim', style: rowStyle },
-          h('span', null, t('cli.models')),
-          h('span', { style: { fontSize: '0.85em', opacity: 0.85 } },
-            cliModels.length === 0 ? t('cli.noModels') : `${cliModels.length}：${cliModels.join(', ')}`),
-        ))
-      }
-      rows.push(h('div', { key: 'clirefresh', style: rowStyle },
-        h('button', { type: 'button', disabled: refreshing, onClick: refreshCli }, refreshing ? t('action.refreshing') : t('action.refreshCli')))
-      )
-
-      // —— 扫码登录（把 doubao login 的二维码搬进卡片）——
-      // 只在服务端提供了 login 能力时渲染：status.login 缺席说明宿主没装配，
-      // 此时给一个会失败的按钮比不显示更糟。
-      const loginState = status?.login
-      if (loginState !== null && loginState !== undefined) {
-        rows.push(h('div', { key: 'gl', style: sectionTitle }, t('group.login')))
-        rows.push(h('div', {
-          key: 'gld',
-          style: { opacity: 0.7, fontSize: '0.85em', lineHeight: 1.5, marginBottom: 6 },
-        }, t('login.desc')))
-
-        const loggedIn = cli?.loggedIn === true
-        if (login.phase === 'waiting') {
-          // 二维码本体：src 为 Host 转好的 data URL，不引入任何外部图片请求
-          rows.push(h('div', {
-            key: 'qr',
-            style: { display: 'flex', justifyContent: 'center', padding: '8px 0' },
-          }, h('img', {
-            src: login.imageDataUrl,
-            alt: t('login.waiting').replace('%s', ''),
-            width: 220,
-            height: 220,
-            style: { width: '220px', height: '220px', borderRadius: '8px', background: '#fff', padding: '8px' },
-          })))
-          const left = Math.max(0, Math.ceil(((login.expiresAt ?? 0) - Date.now()) / 1000))
-          rows.push(h('div', {
-            key: 'qrw',
-            style: { textAlign: 'center', fontSize: '0.88em', opacity: 0.85 },
-          }, t('login.waiting').replace('%s', String(left))))
-          rows.push(h('div', { key: 'qrc', style: rowStyle },
-            h('button', { type: 'button', onClick: () => { void cancelLogin() } }, t('login.cancel'))))
-        } else if (login.phase === 'starting') {
-          rows.push(h('div', { key: 'qrs', style: { opacity: 0.7, fontSize: '0.88em' } }, t('login.starting')))
-        } else if (login.phase === 'success') {
-          rows.push(h('div', { key: 'qrok', style: rowStyle },
-            h('span', { style: { color: '#16a34a', fontSize: '0.9em' } }, `✓ ${t('login.success')}`),
-            h('button', { type: 'button', onClick: () => { void startLogin() } }, t('action.loginAgain'))))
-        } else {
-          // idle 或 error
-          if (login.phase === 'error') {
-            rows.push(h('div', {
-              key: 'qrerr',
-              style: { color: '#dc2626', fontSize: '0.85em', lineHeight: 1.5, marginBottom: 4 },
-            }, `${t('login.failed')}：${login.error}`))
+        if (perAccount.length > 0) {
+          const rows = []
+          for (const entry of perAccount) {
+            const state = entry.ok === true
+              ? t('checkin.account.ok')
+              : entry.ok === false
+                ? `${t('checkin.account.fail')}${entry.code !== null && entry.code !== undefined && entry.code !== 0 ? `（业务码 ${entry.code}）` : ''}`
+                : t('checkin.account.pending')
+            const dotClass = entry.ok === true ? ' dsm-doubaowork-dot-ok' : entry.ok === false ? ' dsm-doubaowork-dot-bad' : ''
+            rows.push(h('li', { key: `ck-${entry.id}`, className: 'dsm-doubaowork-table-row' },
+              h('span', { className: `dsm-doubaowork-dot${dotClass}` }),
+              h('span', { className: 'dsm-doubaowork-table-name' }, `${entry.id}：${state}`),
+              h('span', { className: 'dsm-doubaowork-table-meta' }, entry.day ? String(entry.day) : '')))
           }
-          rows.push(h('div', { key: 'qrbtn', style: rowStyle },
-            h('span', { style: { fontSize: '0.85em', opacity: 0.75 } },
-              loggedIn ? `${t('login.loggedIn')}（${t('action.loginAgain')}）` : t('login.notLoggedIn')),
-            h('button', { type: 'button', onClick: () => { void startLogin() } },
-              loggedIn ? t('action.loginAgain') : t('action.login'))))
+          checkinNodes.push(h('ul', { key: 'ck-table', className: 'dsm-doubaowork-table' }, ...rows))
         }
+        checkinNodes.push(h('div', { key: 'ck-bar', className: 'dsm-doubaowork-bar' },
+          h('div', { className: 'dsm-doubaowork-bar-actions' },
+            button('ck-run', checkingIn ? t('action.checkingIn') : t('action.checkin'), checkinNow, 'outline', checkingIn))))
+        checkinNodes.push(h('p', { key: 'ck-hint', className: 'dsm-doubaowork-hint' }, t('checkin.hint')))
       }
+      accountsPanel.push(group('g-checkin', t('group.checkin'), checkinNodes))
 
-      // —— 账号池健康（只读测量值 + 手动巡检）——
-      rows.push(h('div', { key: 'g2', style: sectionTitle }, t('group.accounts')))
-      const list = Array.isArray(status?.accounts) ? status.accounts : []
-      if (list.length === 0) {
-        rows.push(h('div', { key: 'empty', style: { opacity: 0.7, fontSize: '0.88em' } }, statusError ? t('error.fetch') : t('accounts.empty')))
+      /* ---- 面板五：诊断（留痕 + 说明）---- */
+      const diagnostics = []
+      const traceNodes = []
+      if (status === null || status === undefined) {
+        traceNodes.push(h('p', { key: 'trace-unknown', className: 'dsm-doubaowork-hint' }, statusError ? t('error.fetch') : t('cli.unknown')))
       } else {
-        for (const account of list) {
-          const health = account.health === null || account.health === undefined
-            ? t('accounts.health.unknown')
-            : account.health.ok === true ? t('accounts.health.ok') : `${t('accounts.health.bad')} (HTTP ${account.health.status})`
-          rows.push(h('div', { key: `acct-${account.id}`, style: rowStyle },
-            h('span', null, `${account.label} (${account.id})`),
-            h('span', { style: { fontSize: '0.85em', opacity: 0.8 } }, `${account.enabled ? '' : '· '}${health}`)),
-          )
-        }
-        const lastRun = status?.lastRun ? new Date(status.lastRun).toLocaleString() : t('accounts.never')
-        rows.push(h('div', { key: 'lastrun', style: rowStyle },
-          h('span', { style: { fontSize: '0.85em', opacity: 0.7 } }, `${t('accounts.lastRun')}: ${lastRun}`)),
-        )
+        const mode = String(status.conversationMode ?? 'single') === 'per-chat' ? 'perChat' : 'single'
+        const bound = Number(status.conversations?.count ?? 0)
+        const persisted = status.conversations?.persisted === true
+        traceNodes.push(kv('trace-1', t('trace.mode'), t(`trace.mode.${mode}`), true))
+        traceNodes.push(kv('trace-2', t('trace.bound'), t('trace.bound.value').replace('%s', String(bound))))
+        traceNodes.push(kv('trace-3', t('trace.persisted'),
+          persisted ? t('trace.persisted.yes').replace('%s', String(status.conversations?.file ?? '')) : t('trace.persisted.no'), true))
+        traceNodes.push(h('p', { key: 'trace-hint', className: 'dsm-doubaowork-hint' }, t('trace.hint')))
       }
-      rows.push(h('div', { key: 'probe', style: rowStyle },
-        h('button', { type: 'button', disabled: probing, onClick: probeNow }, probing ? t('action.checking') : t('action.checkNow'))),
-      )
+      diagnostics.push(group('g-trace', t('group.trace'), traceNodes))
 
-      // —— 说明 ——
-      rows.push(h('div', { key: 'g3', style: sectionTitle }, t('group.hint')))
-      rows.push(h('div', { key: 'hintcli', style: { opacity: 0.7, fontSize: '0.85em', lineHeight: 1.5, marginBottom: 6 } }, t('hint.cli')))
-      rows.push(h('div', { key: 'hint', style: { opacity: 0.7, fontSize: '0.85em', lineHeight: 1.5 } }, t('hint.keepalive')))
+      diagnostics.push(group('g-hints', t('group.hint'), [
+        h('p', { key: 'hint-cli', className: 'dsm-doubaowork-hint' }, t('hint.cli')),
+        h('p', { key: 'hint-keepalive', className: 'dsm-doubaowork-hint' }, t('hint.keepalive')),
+      ]))
 
-      return h('div', { className: 'dsm-doubaowork-card' }, rows)
+      /* ---- tab 栏 + 面板 + 底部保存条 ---- */
+      const tabs = [
+        ['overview', t('tab.overview')],
+        ['gateway', t('tab.gateway')],
+        ['models', t('tab.models')],
+        ['accounts', t('tab.accounts')],
+        ['diagnostics', t('tab.diagnostics')],
+      ]
+      const tabBar = h('div', { key: 'tabs', className: 'dsm-doubaowork-panels', role: 'tablist' },
+        ...tabs.map(([id, label]) => h('button', {
+          key: `tab-${id}`,
+          type: 'button',
+          role: 'tab',
+          'aria-selected': tab === id,
+          className: `dsm-doubaowork-panel-tab${tab === id ? ' dsm-doubaowork-panel-tab-active' : ''}`,
+          onClick: () => setTab(id),
+        }, label)))
+
+      const saveBar = settingsScope === undefined ? null : h('div', { key: 'savebar', className: 'dsm-doubaowork-bar' },
+        h('span', { className: 'dsm-doubaowork-bar-status' }, dirty ? t('hint.saveUnsaved') : ''),
+        h('div', { className: 'dsm-doubaowork-bar-actions' },
+          button('save', savedAt > 0 && !dirty ? t('action.saved') : t('action.save'), save, 'primary', !dirty)))
+
+      return h('div', { className: 'dsm-doubaowork-card' },
+        header,
+        tabBar,
+        panel('overview', overview),
+        panel('gateway', gateway),
+        panel('models', modelsPanel),
+        panel('accounts', accountsPanel),
+        panel('diagnostics', diagnostics),
+        saveBar)
     }
 
     /** 设置页导航图标（宿主 settings.section.icon 槽渲染）。 */
